@@ -8,6 +8,8 @@ set -euo pipefail
 : "${BACKUP_PREFIX:?Set the deployed backup resource prefix}"
 
 GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}
+GITHUB_OIDC_SUBJECT_PREFIX=${GITHUB_OIDC_SUBJECT_PREFIX:-$(gh api "repos/$GITHUB_REPOSITORY/actions/oidc/customization/sub" --jq '.sub_claim_prefix // empty' 2>/dev/null || true)}
+GITHUB_OIDC_SUBJECT_PREFIX=${GITHUB_OIDC_SUBJECT_PREFIX:-repo:$GITHUB_REPOSITORY}
 AZURE_LOCATION=${AZURE_LOCATION:-polandcentral}
 CONFIGURE_GITHUB=${CONFIGURE_GITHUB:-true}
 OIDC_RESOURCE_GROUP=${OIDC_RESOURCE_GROUP:-rg-${BACKUP_PREFIX}-github-oidc}
@@ -58,7 +60,7 @@ ensure_identity() {
 
 ensure_federation() {
   local subscription=$1 group=$2 identity=$3 credential=$4 environment=$5 expected actual
-  expected="repo:${GITHUB_REPOSITORY}:environment:${environment}"
+  expected="${GITHUB_OIDC_SUBJECT_PREFIX}:environment:${environment}"
   actual=$(az identity federated-credential show --subscription "$subscription" --resource-group "$group" \
     --identity-name "$identity" --name "$credential" --query subject --output tsv 2>/dev/null || true)
   if [[ -z "$actual" ]]; then
@@ -67,8 +69,8 @@ ensure_federation() {
       --issuer https://token.actions.githubusercontent.com --subject "$expected" \
       --audiences api://AzureADTokenExchange --output none
   elif [[ "$actual" != "$expected" ]]; then
-    echo "Federated credential $credential has unexpected subject: $actual" >&2
-    exit 1
+    az identity federated-credential update --subscription "$subscription" --resource-group "$group" \
+      --identity-name "$identity" --name "$credential" --subject "$expected" --output none
   fi
 }
 
