@@ -187,11 +187,11 @@ if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
   set_environment_variable "$RELEASE_ENVIRONMENT" BACKUP_JOB_NAME "$BACKUP_JOB_NAME"
   set_environment_variable "$RELEASE_ENVIRONMENT" RESTORE_JOB_NAME "$RESTORE_JOB_NAME"
 
-  registry=$(az acr list --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
-    --query '[0].[name,loginServer]' --output tsv)
-  if [[ -n "$registry" ]]; then
-    registry_name=$(cut -f1 <<<"$registry")
-    registry_server=$(cut -f2 <<<"$registry")
+  registry_name=$(az acr list --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query '[0].name' --output tsv)
+  registry_server=$(az acr list --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query '[0].loginServer' --output tsv)
+  if [[ -n "$registry_name" && -n "$registry_server" ]]; then
     set_environment_variable "$BACKUP_ENVIRONMENT" ACR_LOGIN_SERVER "$registry_server"
     set_environment_variable "$RELEASE_ENVIRONMENT" ACR_NAME "$registry_name"
     set_environment_variable "$RELEASE_ENVIRONMENT" ACR_LOGIN_SERVER "$registry_server"
