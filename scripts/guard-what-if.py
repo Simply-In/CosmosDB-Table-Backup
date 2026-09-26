@@ -34,8 +34,21 @@ def public_access_relaxed(path: str, before: object, after: object) -> bool:
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {Path(sys.argv[0]).name} WHAT_IF_JSON")
-    data = json.loads(Path(sys.argv[1]).read_text())
-    changes = data.get("changes", data.get("properties", {}).get("changes", []))
+    payload = Path(sys.argv[1]).read_text(encoding="utf-8-sig").strip().lstrip("\ufeff").strip()
+    try:
+        data = json.loads(payload or "[]")
+    except json.JSONDecodeError as error:
+        code_points = ", ".join(f"U+{ord(char):04X}" for char in payload[:16])
+        raise SystemExit(
+            "What-if output is not JSON "
+            f"({len(payload)} characters; initial code points: {code_points or '<empty>'}): {error}"
+        ) from error
+    if isinstance(data, list):
+        changes = data
+    elif isinstance(data, dict):
+        changes = data.get("changes", data.get("properties", {}).get("changes", []))
+    else:
+        raise SystemExit("What-if JSON must be an object or array")
     failures: list[str] = []
     allow_rbac = os.getenv("ALLOW_ROLE_ASSIGNMENT_CHANGES") == "1"
 

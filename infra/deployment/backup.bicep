@@ -620,7 +620,7 @@ module job 'br/public:avm/res/app/job:0.7.2' = {
           { name: 'BACKUP_STORAGE_ACCOUNT_URL', value: 'https://${names.storage}.blob.${environment().suffixes.storage}' }
           { name: 'BACKUP_CONTAINER_NAME', value: names.container }
           { name: 'BACKUP_KEY_ID', value: vault.outputs.keys[0].uriWithVersion }
-          { name: 'EXCLUDED_TABLES_JSON', value: string(excludedTables) }
+          { name: 'EXCLUDED_TABLES_JSON',           value: '[["${join(excludedTables, '","')}"]' }
           { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.outputs.connectionString }
           { name: 'APPLICATIONINSIGHTS_AUTHENTICATION_STRING', value: 'Authorization=AAD;ClientId=${identity.outputs.clientId}' }
         ]

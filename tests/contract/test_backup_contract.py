@@ -61,7 +61,7 @@ class Tables:
 
 
 class Blob:
-    def __init__(self, name: str, owner: "Container") -> None:
+    def __init__(self, name: str, owner: Container) -> None:
         self.name = name
         self.owner = owner
         self.blocks: dict[str, bytes] = {}

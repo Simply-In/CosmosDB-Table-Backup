@@ -14,7 +14,7 @@ Application-level backups for an Azure Cosmos DB Table API account, isolated in 
 
 ## Repository
 
-- `src/cosmos_table_backup/` — Python 3.12 backup job.
+- `src/cosmos_table_backup/` — Python 3.14 backup job.
 - `tests/` — unit and format-contract tests.
 - `infra/` — Bicep/AVM deployment stacks.
 - `scripts/` — read-only preflight and operational validation helpers.

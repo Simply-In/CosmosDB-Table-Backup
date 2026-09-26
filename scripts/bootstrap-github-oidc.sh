@@ -8,6 +8,8 @@ set -euo pipefail
 : "${BACKUP_PREFIX:?Set the deployed backup resource prefix}"
 
 GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}
+GITHUB_OIDC_SUBJECT_PREFIX=${GITHUB_OIDC_SUBJECT_PREFIX:-$(gh api "repos/$GITHUB_REPOSITORY/actions/oidc/customization/sub" --jq '.sub_claim_prefix // empty' 2>/dev/null || true)}
+GITHUB_OIDC_SUBJECT_PREFIX=${GITHUB_OIDC_SUBJECT_PREFIX:-repo:$GITHUB_REPOSITORY}
 AZURE_LOCATION=${AZURE_LOCATION:-polandcentral}
 CONFIGURE_GITHUB=${CONFIGURE_GITHUB:-true}
 OIDC_RESOURCE_GROUP=${OIDC_RESOURCE_GROUP:-rg-${BACKUP_PREFIX}-github-oidc}
@@ -58,7 +60,7 @@ ensure_identity() {
 
 ensure_federation() {
   local subscription=$1 group=$2 identity=$3 credential=$4 environment=$5 expected actual
-  expected="repo:${GITHUB_REPOSITORY}:environment:${environment}"
+  expected="${GITHUB_OIDC_SUBJECT_PREFIX}:environment:${environment}"
   actual=$(az identity federated-credential show --subscription "$subscription" --resource-group "$group" \
     --identity-name "$identity" --name "$credential" --query subject --output tsv 2>/dev/null || true)
   if [[ -z "$actual" ]]; then
@@ -67,8 +69,8 @@ ensure_federation() {
       --issuer https://token.actions.githubusercontent.com --subject "$expected" \
       --audiences api://AzureADTokenExchange --output none
   elif [[ "$actual" != "$expected" ]]; then
-    echo "Federated credential $credential has unexpected subject: $actual" >&2
-    exit 1
+    az identity federated-credential update --subscription "$subscription" --resource-group "$group" \
+      --identity-name "$identity" --name "$credential" --subject "$expected" --output none
   fi
 }
 
@@ -123,6 +125,10 @@ backup_group_scope="$backup_subscription_scope/resourceGroups/$AZURE_RESOURCE_GR
 source_group_scope="/subscriptions/$AZURE_SOURCE_SUBSCRIPTION_ID/resourceGroups/$source_resource_group"
 ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_subscription_scope" "$backup_principal" b24988ac-6180-42a0-ab88-20f7382dd24c
 ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_subscription_scope" "$backup_principal" f58310d9-a9f6-439a-9e8d-f62e7b41a168
+role_definition_manager=$(ensure_custom_role "$AZURE_BACKUP_SUBSCRIPTION_ID" 'Cosmos Table Backup Role Definition Manager' \
+  'Manages the custom role definitions required by the backup platform deployment.' "$backup_subscription_scope" \
+  '["Microsoft.Authorization/roleDefinitions/read","Microsoft.Authorization/roleDefinitions/write","Microsoft.Authorization/roleDefinitions/delete"]')
+ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_subscription_scope" "$backup_principal" "$role_definition_manager"
 ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_group_scope" "$release_principal" 8311e382-0749-4cb8-b61a-304f252e45ec
 
 release_role=$(ensure_custom_role "$AZURE_BACKUP_SUBSCRIPTION_ID" 'Cosmos Table Backup Job Image Deployer' \
@@ -164,6 +170,7 @@ if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
     ensure_deployment_policy "$environment" "$DEPLOYMENT_BRANCH" branch
   done
   ensure_deployment_policy "$RELEASE_ENVIRONMENT" 'v*' tag
+  ensure_deployment_policy "$BACKUP_ENVIRONMENT" 'v*' tag
 
   set_environment_variable "$BACKUP_ENVIRONMENT" AZURE_TENANT_ID "$backup_tenant"
   set_environment_variable "$BACKUP_ENVIRONMENT" AZURE_BACKUP_SUBSCRIPTION_ID "$AZURE_BACKUP_SUBSCRIPTION_ID"
@@ -185,11 +192,11 @@ if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
   set_environment_variable "$RELEASE_ENVIRONMENT" BACKUP_JOB_NAME "$BACKUP_JOB_NAME"
   set_environment_variable "$RELEASE_ENVIRONMENT" RESTORE_JOB_NAME "$RESTORE_JOB_NAME"
 
-  registry=$(az acr list --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
-    --query '[0].[name,loginServer]' --output tsv)
-  if [[ -n "$registry" ]]; then
-    registry_name=$(cut -f1 <<<"$registry")
-    registry_server=$(cut -f2 <<<"$registry")
+  registry_name=$(az acr list --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query '[0].name' --output tsv)
+  registry_server=$(az acr list --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query '[0].loginServer' --output tsv)
+  if [[ -n "$registry_name" && -n "$registry_server" ]]; then
     set_environment_variable "$BACKUP_ENVIRONMENT" ACR_LOGIN_SERVER "$registry_server"
     set_environment_variable "$RELEASE_ENVIRONMENT" ACR_NAME "$registry_name"
     set_environment_variable "$RELEASE_ENVIRONMENT" ACR_LOGIN_SERVER "$registry_server"
