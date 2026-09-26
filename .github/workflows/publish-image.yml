@@ -35,7 +35,7 @@ jobs:
     outputs:
       image: ${{ steps.image.outputs.reference }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate release configuration
         run: |
           : "${SUBSCRIPTION_ID:?Set AZURE_BACKUP_SUBSCRIPTION_ID in the release environment}"
@@ -45,12 +45,12 @@ jobs:
           : "${REGISTRY_SERVER:?Set ACR_LOGIN_SERVER in the release environment}"
           : "${BACKUP_JOB_NAME:?Set BACKUP_JOB_NAME in the release environment}"
           : "${RESTORE_JOB_NAME:?Set RESTORE_JOB_NAME in the release environment}"
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_RELEASE_CLIENT_ID }}
           tenant-id: ${{ env.TENANT_ID }}
           subscription-id: ${{ env.SUBSCRIPTION_ID }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Sign in to ACR with OIDC identity
         run: az acr login --name "$REGISTRY_NAME"
       - name: Build and push immutable image
@@ -72,7 +72,7 @@ jobs:
           ACR_LOGIN_SERVER: ${{ env.REGISTRY_SERVER }}
           AZURE_RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
         run: ./scripts/deploy-job-image.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image-reference-${{ github.run_id }}
           retention-days: 90
