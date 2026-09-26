@@ -35,7 +35,14 @@ def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {Path(sys.argv[0]).name} WHAT_IF_JSON")
     payload = Path(sys.argv[1]).read_text(encoding="utf-8-sig").strip().lstrip("\ufeff").strip()
-    data = json.loads(payload or "[]")
+    try:
+        data = json.loads(payload or "[]")
+    except json.JSONDecodeError as error:
+        code_points = ", ".join(f"U+{ord(char):04X}" for char in payload[:16])
+        raise SystemExit(
+            "What-if output is not JSON "
+            f"({len(payload)} characters; initial code points: {code_points or '<empty>'}): {error}"
+        ) from error
     if isinstance(data, list):
         changes = data
     elif isinstance(data, dict):
