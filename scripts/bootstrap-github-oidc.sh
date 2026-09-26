@@ -125,6 +125,10 @@ backup_group_scope="$backup_subscription_scope/resourceGroups/$AZURE_RESOURCE_GR
 source_group_scope="/subscriptions/$AZURE_SOURCE_SUBSCRIPTION_ID/resourceGroups/$source_resource_group"
 ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_subscription_scope" "$backup_principal" b24988ac-6180-42a0-ab88-20f7382dd24c
 ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_subscription_scope" "$backup_principal" f58310d9-a9f6-439a-9e8d-f62e7b41a168
+role_definition_manager=$(ensure_custom_role "$AZURE_BACKUP_SUBSCRIPTION_ID" 'Cosmos Table Backup Role Definition Manager' \
+  'Manages the custom role definitions required by the backup platform deployment.' "$backup_subscription_scope" \
+  '["Microsoft.Authorization/roleDefinitions/read","Microsoft.Authorization/roleDefinitions/write","Microsoft.Authorization/roleDefinitions/delete"]')
+ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_subscription_scope" "$backup_principal" "$role_definition_manager"
 ensure_role_assignment "$AZURE_BACKUP_SUBSCRIPTION_ID" "$backup_group_scope" "$release_principal" 8311e382-0749-4cb8-b61a-304f252e45ec
 
 release_role=$(ensure_custom_role "$AZURE_BACKUP_SUBSCRIPTION_ID" 'Cosmos Table Backup Job Image Deployer' \
