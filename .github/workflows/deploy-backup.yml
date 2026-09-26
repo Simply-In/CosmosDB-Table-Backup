@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: backup-infrastructure
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate deployment configuration
         run: |
           : "${SUBSCRIPTION_ID:?Set AZURE_BACKUP_SUBSCRIPTION_ID in the backup-infrastructure environment}"
@@ -55,7 +55,7 @@ jobs:
           : "${LOCATION:?Set AZURE_LOCATION in the backup-infrastructure environment}"
           : "${RESOURCE_GROUP:?Set AZURE_RESOURCE_GROUP in the backup-infrastructure environment}"
           : "${BACKUP_JOB_NAME:?Set BACKUP_JOB_NAME in the backup-infrastructure environment}"
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_BACKUP_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ env.TENANT_ID }}
@@ -105,7 +105,7 @@ jobs:
             --result-format FullResourcePayloads --output json > what-if.json
           python3 scripts/guard-what-if.py what-if.json
       - name: Upload what-if
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backup-what-if-${{ github.run_id }}
           retention-days: 30
@@ -133,7 +133,7 @@ jobs:
             --output json > deployment.json
       - name: Upload deployment outputs
         if: inputs.apply
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backup-deployment-${{ github.run_id }}
           retention-days: 30
