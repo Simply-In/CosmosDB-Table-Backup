@@ -166,6 +166,7 @@ if [[ "$CONFIGURE_GITHUB" == "true" ]]; then
     ensure_deployment_policy "$environment" "$DEPLOYMENT_BRANCH" branch
   done
   ensure_deployment_policy "$RELEASE_ENVIRONMENT" 'v*' tag
+  ensure_deployment_policy "$BACKUP_ENVIRONMENT" 'v*' tag
 
   set_environment_variable "$BACKUP_ENVIRONMENT" AZURE_TENANT_ID "$backup_tenant"
   set_environment_variable "$BACKUP_ENVIRONMENT" AZURE_BACKUP_SUBSCRIPTION_ID "$AZURE_BACKUP_SUBSCRIPTION_ID"

@@ -77,7 +77,7 @@ The first run can occur before ACR exists. Run the script again after the initia
 - `BACKUP_JOB_NAME`
 - `RESTORE_JOB_NAME`
 
-The bootstrap uses its authenticated GitHub operator as the initial required reviewer and permits self-approval so a single maintainer can operate nonproduction. Before production use, replace that reviewer with the owning team, prevent self-review, add deployment wait timers if required, and keep environment administrators limited.
+The bootstrap uses its authenticated GitHub operator as the initial required reviewer and permits self-approval so a single maintainer can operate nonproduction. It permits deployment workflows from the configured branch and immutable `v*` release tags. Before production use, replace that reviewer with the owning team, prevent self-review, add deployment wait timers if required, and keep environment administrators limited.
 
 ## Deployment order
 
