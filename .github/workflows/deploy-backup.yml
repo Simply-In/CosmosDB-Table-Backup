@@ -103,6 +103,8 @@ jobs:
               restoreScheduleEnabled="$INPUT_ENABLE_RESTORE" \
               restoreAccessEnabled="$INPUT_ENABLE_RESTORE" \
             --result-format FullResourcePayloads --output json > what-if.json
+          # Azure CLI returns no JSON payload when What-if finds no changes.
+          [[ -s what-if.json ]] || printf '[]\n' > what-if.json
           python3 scripts/guard-what-if.py what-if.json
       - name: Upload what-if
         uses: actions/upload-artifact@v7
