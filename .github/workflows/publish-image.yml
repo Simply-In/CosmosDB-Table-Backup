@@ -1,0 +1,43 @@
+name: Publish backup image
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SUBSCRIPTION_ID: ${{ vars.AZURE_BACKUP_SUBSCRIPTION_ID }}
+  TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: backup-nonprod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_BACKUP_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Sign in to ACR without registry credentials
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+      - name: Build and push
+        run: |
+          image="${{ vars.ACR_LOGIN_SERVER }}/cosmos-table-backup:${GITHUB_SHA}"
+          docker buildx build --platform linux/amd64 --provenance=true --sbom=true \
+            --tag "$image" --push --metadata-file image-metadata.json .
+          digest=$(jq -r '."containerimage.digest"' image-metadata.json)
+          test "$digest" != null
+          printf '%s@%s\n' "${{ vars.ACR_LOGIN_SERVER }}/cosmos-table-backup" "$digest" > image-reference.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-reference-${{ github.run_id }}
+          path: |
+            image-reference.txt
+            image-metadata.json

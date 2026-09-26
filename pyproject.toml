@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cosmos-table-backup"
+version = "0.1.0"
+description = "Encrypted streaming backups for Azure Cosmos DB for Table"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "azure-data-tables==12.7.0",
+  "azure-identity==1.25.1",
+  "azure-keyvault-keys==4.11.0",
+  "azure-monitor-opentelemetry==1.8.10",
+  "azure-storage-blob==12.27.1",
+  "cryptography==50.0.0",
+]
+
+[project.scripts]
+cosmos-table-backup = "cosmos_table_backup.cli:main"
+cosmos-table-restore = "cosmos_table_backup.restore_cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy==1.18.2",
+  "pytest==9.0.3",
+  "pytest-cov==7.0.0",
+  "ruff==0.14.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cosmos_table_backup"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["cosmos_table_backup"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --cov=cosmos_table_backup --cov-report=term-missing --cov-fail-under=90"
+testpaths = ["tests"]
