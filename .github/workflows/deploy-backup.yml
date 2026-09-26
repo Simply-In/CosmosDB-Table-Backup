@@ -102,7 +102,7 @@ jobs:
               scheduleEnabled="$INPUT_ENABLE_SCHEDULE" \
               restoreScheduleEnabled="$INPUT_ENABLE_RESTORE" \
               restoreAccessEnabled="$INPUT_ENABLE_RESTORE" \
-            --result-format FullResourcePayloads --only-show-errors --output json > what-if.json
+            --result-format FullResourcePayloads --no-pretty-print --only-show-errors --output json > what-if.json
           # Azure CLI can emit whitespace before a UTF-8 BOM for an empty What-if response.
           python3 - <<'PY'
           from pathlib import Path
