@@ -34,7 +34,8 @@ def public_access_relaxed(path: str, before: object, after: object) -> bool:
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {Path(sys.argv[0]).name} WHAT_IF_JSON")
-    data = json.loads(Path(sys.argv[1]).read_text())
+    payload = Path(sys.argv[1]).read_text(encoding="utf-8-sig").strip().lstrip("\ufeff").strip()
+    data = json.loads(payload or "[]")
     if isinstance(data, list):
         changes = data
     elif isinstance(data, dict):

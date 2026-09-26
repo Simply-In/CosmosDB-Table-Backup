@@ -103,12 +103,12 @@ jobs:
               restoreScheduleEnabled="$INPUT_ENABLE_RESTORE" \
               restoreAccessEnabled="$INPUT_ENABLE_RESTORE" \
             --result-format FullResourcePayloads --only-show-errors --output json > what-if.json
-          # Azure CLI can emit a UTF-8 BOM or whitespace for an empty What-if response.
+          # Azure CLI can emit whitespace before a UTF-8 BOM for an empty What-if response.
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path('what-if.json')
-          payload = path.read_text(encoding='utf-8-sig').strip()
+          payload = path.read_text(encoding='utf-8-sig').strip().lstrip('\ufeff').strip()
           path.write_text(payload or '[]\n')
           PY
           python3 scripts/guard-what-if.py what-if.json
