@@ -1,4 +1,4 @@
-targetScope = 'subscription'
+targetScope = 'resourceGroup'
 
 @description('Full resource ID of the existing source Cosmos DB for Table account.')
 param sourceCosmosAccountResourceId string
@@ -11,14 +11,12 @@ param cosmosPrivateEndpointResourceId string
 
 var idParts = split(sourceCosmosAccountResourceId, '/')
 var sourceSubscriptionId = idParts[2]
-var sourceResourceGroupName = idParts[4]
 var sourceAccountName = idParts[8]
 
 // This template deliberately runs under the source-subscription deployment identity. It creates no
 // network, DNS, route, endpoint, account, key, or backup-policy resources in the source subscription.
 module integration '../resources/source-integration.bicep' = {
   name: 'cosmos-table-backup-integration'
-  scope: resourceGroup(sourceResourceGroupName)
   params: {
     sourceCosmosAccountResourceId: sourceCosmosAccountResourceId
     sourceAccountName: sourceAccountName

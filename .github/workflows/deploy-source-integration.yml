@@ -25,23 +25,39 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: source-integration-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   SUBSCRIPTION_ID: ${{ vars.AZURE_SOURCE_SUBSCRIPTION_ID }}
   TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-  LOCATION: polandcentral
   SOURCE_ACCOUNT_ID: ${{ vars.SOURCE_COSMOS_ACCOUNT_RESOURCE_ID }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: source-nonprod
+    environment: source-integration
     steps:
       - uses: actions/checkout@v4
+      - name: Validate deployment configuration
+        run: |
+          : "${SUBSCRIPTION_ID:?Set AZURE_SOURCE_SUBSCRIPTION_ID in the source-integration environment}"
+          : "${TENANT_ID:?Set AZURE_TENANT_ID in the source-integration environment}"
+          : "${SOURCE_ACCOUNT_ID:?Set SOURCE_COSMOS_ACCOUNT_RESOURCE_ID in the source-integration environment}"
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_SOURCE_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ env.TENANT_ID }}
           subscription-id: ${{ env.SUBSCRIPTION_ID }}
+      - name: Resolve source account
+        run: |
+          set -euo pipefail
+          source_rg=$(cut -d/ -f5 <<<"$SOURCE_ACCOUNT_ID")
+          source_name=$(cut -d/ -f9 <<<"$SOURCE_ACCOUNT_ID")
+          [[ -n "$source_rg" && -n "$source_name" ]] || { echo 'Invalid source account resource ID' >&2; exit 1; }
+          echo "SOURCE_RESOURCE_GROUP=$source_rg" >> "$GITHUB_ENV"
+          echo "SOURCE_ACCOUNT_NAME=$source_name" >> "$GITHUB_ENV"
       - name: Validate Bicep
         run: |
           az bicep restore --file infra/deployment/production-integration.bicep
@@ -53,8 +69,8 @@ jobs:
           INPUT_PE_RESOURCE_ID: ${{ inputs.cosmos_private_endpoint_resource_id }}
         run: |
           actual=$(az cosmosdb private-endpoint-connection show \
-            --resource-group rg-sintoken-backend-dev-plc \
-            --account-name cdb-sintoken-backend-dev-plc \
+            --resource-group "$SOURCE_RESOURCE_GROUP" \
+            --account-name "$SOURCE_ACCOUNT_NAME" \
             --name "$INPUT_PE_NAME" \
             --query privateEndpoint.id --output tsv)
           expected="$INPUT_PE_RESOURCE_ID"
@@ -67,7 +83,7 @@ jobs:
           INPUT_PE_RESOURCE_ID: ${{ inputs.cosmos_private_endpoint_resource_id }}
         run: |
           name="source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          az deployment sub what-if --name "$name" --location "$LOCATION" \
+          az deployment group what-if --name "$name" --resource-group "$SOURCE_RESOURCE_GROUP" \
             --template-file infra/deployment/production-integration.bicep \
             --parameters sourceCosmosAccountResourceId="$SOURCE_ACCOUNT_ID" \
               backupIdentityPrincipalId="$INPUT_BACKUP_PRINCIPAL_ID" \
@@ -78,6 +94,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: source-what-if-${{ github.run_id }}
+          retention-days: 30
           path: what-if.json
       - name: Deploy
         if: inputs.apply
@@ -87,9 +104,17 @@ jobs:
           INPUT_PE_RESOURCE_ID: ${{ inputs.cosmos_private_endpoint_resource_id }}
         run: |
           name="source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          az deployment sub create --name "$name" --location "$LOCATION" \
+          az deployment group create --name "$name" --resource-group "$SOURCE_RESOURCE_GROUP" \
             --template-file infra/deployment/production-integration.bicep \
             --parameters sourceCosmosAccountResourceId="$SOURCE_ACCOUNT_ID" \
               backupIdentityPrincipalId="$INPUT_BACKUP_PRINCIPAL_ID" \
               cosmosPrivateEndpointName="$INPUT_PE_NAME" \
-              cosmosPrivateEndpointResourceId="$INPUT_PE_RESOURCE_ID"
+              cosmosPrivateEndpointResourceId="$INPUT_PE_RESOURCE_ID" \
+            --output json > deployment.json
+      - name: Upload deployment outputs
+        if: inputs.apply
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-deployment-${{ github.run_id }}
+          retention-days: 30
+          path: deployment.json

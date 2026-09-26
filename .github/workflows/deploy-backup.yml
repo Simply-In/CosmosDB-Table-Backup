@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: Immutable ACR image reference; leave empty only for the disabled bootstrap deployment
+        description: Immutable ACR image reference; empty preserves the live job image or uses the disabled bootstrap value
         required: false
         default: ''
         type: string
@@ -28,18 +28,33 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: backup-infrastructure-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   SUBSCRIPTION_ID: ${{ vars.AZURE_BACKUP_SUBSCRIPTION_ID }}
   TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   SOURCE_ACCOUNT_ID: ${{ vars.SOURCE_COSMOS_ACCOUNT_RESOURCE_ID }}
-  LOCATION: polandcentral
+  LOCATION: ${{ vars.AZURE_LOCATION }}
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  BACKUP_JOB_NAME: ${{ vars.BACKUP_JOB_NAME }}
+  REGISTRY_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: backup-nonprod
+    environment: backup-infrastructure
     steps:
       - uses: actions/checkout@v4
+      - name: Validate deployment configuration
+        run: |
+          : "${SUBSCRIPTION_ID:?Set AZURE_BACKUP_SUBSCRIPTION_ID in the backup-infrastructure environment}"
+          : "${TENANT_ID:?Set AZURE_TENANT_ID in the backup-infrastructure environment}"
+          : "${SOURCE_ACCOUNT_ID:?Set SOURCE_COSMOS_ACCOUNT_RESOURCE_ID in the backup-infrastructure environment}"
+          : "${LOCATION:?Set AZURE_LOCATION in the backup-infrastructure environment}"
+          : "${RESOURCE_GROUP:?Set AZURE_RESOURCE_GROUP in the backup-infrastructure environment}"
+          : "${BACKUP_JOB_NAME:?Set BACKUP_JOB_NAME in the backup-infrastructure environment}"
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_BACKUP_DEPLOY_CLIENT_ID }}
@@ -57,13 +72,26 @@ jobs:
           INPUT_ENABLE_SCHEDULE: ${{ inputs.enable_schedule }}
           INPUT_ENABLE_RESTORE: ${{ inputs.enable_restore_validation }}
         run: |
+          set -euo pipefail
           image="$INPUT_IMAGE"
+          if [[ -z "$image" ]] && az containerapp job show --resource-group "$RESOURCE_GROUP" \
+            --name "$BACKUP_JOB_NAME" --output none 2>/dev/null; then
+            image=$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$BACKUP_JOB_NAME" \
+              --query 'properties.template.containers[0].image' --output tsv)
+          fi
           if [[ -n "$image" ]]; then
-            case "$image" in *@sha256:*) ;; *) echo 'Image must use a sha256 digest' >&2; exit 1;; esac
+            : "${REGISTRY_SERVER:?Set ACR_LOGIN_SERVER before using a deployed image}"
+            prefix="$REGISTRY_SERVER/cosmos-table-backup@sha256:"
+            digest=${image#"$prefix"}
+            [[ "$image" == "$prefix"* && "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo 'Image must be the expected ACR repository pinned by sha256 digest' >&2
+              exit 1
+            }
           elif [[ "$INPUT_ENABLE_SCHEDULE" == "true" || "$INPUT_ENABLE_RESTORE" == "true" ]]; then
             echo 'A digest-pinned image is required before enabling a schedule' >&2
             exit 1
           fi
+          printf '%s\n' "$image" > resolved-image.txt
           name="backup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           image_args=()
           [[ -z "$image" ]] || image_args=(backupImage="$image")
@@ -80,17 +108,21 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backup-what-if-${{ github.run_id }}
-          path: what-if.json
+          retention-days: 30
+          path: |
+            what-if.json
+            resolved-image.txt
       - name: Deploy
         if: inputs.apply
         env:
-          INPUT_IMAGE: ${{ inputs.image }}
           INPUT_ENABLE_SCHEDULE: ${{ inputs.enable_schedule }}
           INPUT_ENABLE_RESTORE: ${{ inputs.enable_restore_validation }}
         run: |
+          set -euo pipefail
           name="backup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          image=$(cat resolved-image.txt)
           image_args=()
-          [[ -z "$INPUT_IMAGE" ]] || image_args=(backupImage="$INPUT_IMAGE")
+          [[ -z "$image" ]] || image_args=(backupImage="$image")
           az deployment sub create --name "$name" --location "$LOCATION" \
             --template-file infra/main.bicep \
             --parameters infra/parameters/nonprod.bicepparam \
@@ -104,4 +136,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backup-deployment-${{ github.run_id }}
+          retention-days: 30
           path: deployment.json

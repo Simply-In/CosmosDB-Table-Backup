@@ -41,7 +41,7 @@ az bicep build --file infra/main.bicep
 ./scripts/preflight.sh
 ```
 
-Deployments use separate GitHub environments and federated identities for the backup and source subscriptions. Never grant a runtime identity deployment permissions.
+Deployments use separate GitHub environments and federated identities for infrastructure, source integration, and immutable image release. See [Deployment and CI/CD](docs/deployment.md) for the OIDC bootstrap, required variables, promotion, rollback, and production-fork procedure. Never grant a runtime identity deployment permissions.
 
 ## Scope
 

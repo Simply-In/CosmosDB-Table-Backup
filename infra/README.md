@@ -7,7 +7,7 @@ This directory composes the isolated backup subscription, dormant-by-default res
 1. Run tenant/subscription preflight checks and register `Microsoft.App`, `Microsoft.ContainerRegistry`, `Microsoft.DocumentDB`, `Microsoft.Insights`, `Microsoft.KeyVault`, `Microsoft.ManagedIdentity`, `Microsoft.Network`, `Microsoft.OperationalInsights`, and `Microsoft.Storage` in the applicable subscription.
 2. Deploy `main.bicep` to target subscription `<backup-subscription-id>`. Keep `scheduleEnabled=false`, `restoreScheduleEnabled=false`, and `restoreAccessEnabled=false` for bootstrap. The deployment identity needs resource deployment and role-definition/role-assignment permissions. Review `what-if` first.
 3. Publish the application image to the created Premium ACR and use an immutable `@sha256:` reference.
-4. From the `main.bicep` outputs, pass the UAMI principal ID and private endpoint values to `deployment/production-integration.bicep`. Deploy that template separately under the source-subscription OIDC identity in subscription `<source-subscription-id>`.
+4. From the `main.bicep` outputs, pass the UAMI principal ID and private endpoint values to `deployment/production-integration.bicep`. Deploy that resource-group-scoped template separately under the source-subscription OIDC identity in the source account's resource group.
 5. Validate DNS and the bounded read-only Cosmos smoke test. Validate Blob create plus overwrite/delete denial and Key Vault wrap plus unwrap denial. Only then redeploy with the immutable image and `scheduleEnabled=true`.
 6. Validate an isolated restore manually before scheduling it: redeploy with `restoreAccessEnabled=true` and `restoreScheduleEnabled=false`, start the restore job by its `restoreJobResourceId` output, and verify integrity plus `restore.completed`.
 7. Enable monthly restore validation only through an approved change that sets **both** `restoreAccessEnabled=true` and `restoreScheduleEnabled=true`. The job remains manual unless both flags are true. If continuous monthly validation is required, the security owner must explicitly accept that restore-only grants remain active. To end an access window, set both flags false **and remove the four restore role assignments explicitly**, or manage this template with an Azure Deployment Stack configured to delete resources that become unmanaged. Ordinary incremental ARM deployments do not delete role assignments omitted by a false condition; verify effective access before declaring the identity dormant.
@@ -29,9 +29,9 @@ az deployment sub what-if \
 Example source integration (values are outputs from step 2):
 
 ```sh
-az deployment sub what-if \
+az deployment group what-if \
   --subscription <source-subscription-id> \
-  --location polandcentral \
+  --resource-group <source-resource-group> \
   --template-file infra/deployment/production-integration.bicep \
   --parameters sourceCosmosAccountResourceId='<source-id>' \
                backupIdentityPrincipalId='<principal-id>' \

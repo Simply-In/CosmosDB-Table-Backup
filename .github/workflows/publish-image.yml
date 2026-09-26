@@ -1,7 +1,13 @@
-name: Publish backup image
+name: Release job image
 
 on:
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: Roll the immutable digest out to both Container Apps jobs
+        required: true
+        default: true
+        type: boolean
   push:
     tags: ['v*']
 
@@ -9,35 +15,84 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   SUBSCRIPTION_ID: ${{ vars.AZURE_BACKUP_SUBSCRIPTION_ID }}
   TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  REGISTRY_NAME: ${{ vars.ACR_NAME }}
+  REGISTRY_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  BACKUP_JOB_NAME: ${{ vars.BACKUP_JOB_NAME }}
+  RESTORE_JOB_NAME: ${{ vars.RESTORE_JOB_NAME }}
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: backup-nonprod
+    environment: release
+    outputs:
+      image: ${{ steps.image.outputs.reference }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release configuration
+        run: |
+          : "${SUBSCRIPTION_ID:?Set AZURE_BACKUP_SUBSCRIPTION_ID in the release environment}"
+          : "${TENANT_ID:?Set AZURE_TENANT_ID in the release environment}"
+          : "${RESOURCE_GROUP:?Set AZURE_RESOURCE_GROUP in the release environment}"
+          : "${REGISTRY_NAME:?Set ACR_NAME in the release environment}"
+          : "${REGISTRY_SERVER:?Set ACR_LOGIN_SERVER in the release environment}"
+          : "${BACKUP_JOB_NAME:?Set BACKUP_JOB_NAME in the release environment}"
+          : "${RESTORE_JOB_NAME:?Set RESTORE_JOB_NAME in the release environment}"
       - uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_BACKUP_DEPLOY_CLIENT_ID }}
+          client-id: ${{ vars.AZURE_RELEASE_CLIENT_ID }}
           tenant-id: ${{ env.TENANT_ID }}
           subscription-id: ${{ env.SUBSCRIPTION_ID }}
       - uses: docker/setup-buildx-action@v3
-      - name: Sign in to ACR without registry credentials
-        run: az acr login --name "${{ vars.ACR_NAME }}"
-      - name: Build and push
+      - name: Sign in to ACR with OIDC identity
+        run: az acr login --name "$REGISTRY_NAME"
+      - name: Build and push immutable image
         run: |
-          image="${{ vars.ACR_LOGIN_SERVER }}/cosmos-table-backup:${GITHUB_SHA}"
+          tag="$REGISTRY_SERVER/cosmos-table-backup:${GITHUB_SHA}"
           docker buildx build --platform linux/amd64 --provenance=true --sbom=true \
-            --tag "$image" --push --metadata-file image-metadata.json .
-          digest=$(jq -r '."containerimage.digest"' image-metadata.json)
-          test "$digest" != null
-          printf '%s@%s\n' "${{ vars.ACR_LOGIN_SERVER }}/cosmos-table-backup" "$digest" > image-reference.txt
+            --tag "$tag" --push --metadata-file image-metadata.json .
+      - name: Record image digest
+        id: image
+        run: |
+          digest=$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' image-metadata.json)
+          reference="$REGISTRY_SERVER/cosmos-table-backup@$digest"
+          printf '%s\n' "$reference" > image-reference.txt
+          echo "reference=$reference" >> "$GITHUB_OUTPUT"
+      - name: Update backup and dormant restore jobs
+        if: github.event_name == 'push' || inputs.deploy
+        env:
+          IMAGE: ${{ steps.image.outputs.reference }}
+          ACR_LOGIN_SERVER: ${{ env.REGISTRY_SERVER }}
+          AZURE_RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
+        run: ./scripts/deploy-job-image.sh
       - uses: actions/upload-artifact@v4
         with:
           name: image-reference-${{ github.run_id }}
+          retention-days: 90
           path: |
             image-reference.txt
             image-metadata.json
+
+  github-release:
+    if: github.event_name == 'push'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create immutable release record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          printf "Container image: \`%s\`\n" "$IMAGE" > release-notes.md
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes --notes-file release-notes.md

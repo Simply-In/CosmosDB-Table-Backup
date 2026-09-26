@@ -185,6 +185,7 @@ output backupIdentityResourceId string = backup.outputs.backupIdentityResourceId
 output restoreIdentityPrincipalId string = backup.outputs.restoreIdentityPrincipalId
 output restoreIdentityResourceId string = backup.outputs.restoreIdentityResourceId
 output restoreTestCosmosAccountResourceId string = backup.outputs.restoreTestCosmosAccountResourceId
+output backupJobResourceId string = backup.outputs.backupJobResourceId
 output restoreJobResourceId string = backup.outputs.restoreJobResourceId
 output backupKeyVersionUri string = backup.outputs.backupKeyVersionUri
 output cosmosPrivateEndpointResourceId string = backup.outputs.cosmosPrivateEndpointResourceId
