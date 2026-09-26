@@ -1,0 +1,61 @@
+name: Build and validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.19'
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: uv lock --check
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src
+      - run: uv run pytest --cov=cosmos_table_backup --cov-report=term-missing --cov-fail-under=90
+      - run: uv run --with pip-audit pip-audit
+      - run: uv run --with bandit bandit -q -r src
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: az bicep install
+      - run: az bicep restore --file infra/main.bicep
+      - run: az bicep lint --file infra/main.bicep
+      - run: az bicep build --file infra/main.bicep
+      - run: az bicep restore --file infra/deployment/production-integration.bicep
+      - run: az bicep lint --file infra/deployment/production-integration.bicep
+      - run: az bicep build --file infra/deployment/production-integration.bicep
+      - run: az bicep build-params --file infra/parameters/nonprod.bicepparam --stdout > /dev/null
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: cosmos-table-backup:validation
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

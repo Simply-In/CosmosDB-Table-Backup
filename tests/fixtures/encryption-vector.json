@@ -1,0 +1,8 @@
+{
+  "aad_utf8": "{\"fixture\":\"v1\"}",
+  "ciphertext_hex": "4354424531000102030405060708090a0b246da576aa96ef6fec23fbee9c8b190ee8a3f73e1db08552d4a78b64a4d560f418f8a159",
+  "dek_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce_hex": "000102030405060708090a0b",
+  "plaintext_utf8": "cosmos-table-backup\n",
+  "vector_version": 1
+}

@@ -1,0 +1,120 @@
+name: Deploy source integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_identity_principal_id:
+        description: Backup UAMI principal ID from the backup deployment
+        required: true
+        type: string
+      cosmos_private_endpoint_name:
+        description: Cosmos-side pending private endpoint connection name
+        required: true
+        type: string
+      cosmos_private_endpoint_resource_id:
+        description: Full private endpoint resource ID from the backup deployment
+        required: true
+        type: string
+      apply:
+        description: Apply after what-if and source environment approval
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: source-integration-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  SUBSCRIPTION_ID: ${{ vars.AZURE_SOURCE_SUBSCRIPTION_ID }}
+  TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  SOURCE_ACCOUNT_ID: ${{ vars.SOURCE_COSMOS_ACCOUNT_RESOURCE_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: source-integration
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deployment configuration
+        run: |
+          : "${SUBSCRIPTION_ID:?Set AZURE_SOURCE_SUBSCRIPTION_ID in the source-integration environment}"
+          : "${TENANT_ID:?Set AZURE_TENANT_ID in the source-integration environment}"
+          : "${SOURCE_ACCOUNT_ID:?Set SOURCE_COSMOS_ACCOUNT_RESOURCE_ID in the source-integration environment}"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_SOURCE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+      - name: Resolve source account
+        run: |
+          set -euo pipefail
+          source_rg=$(cut -d/ -f5 <<<"$SOURCE_ACCOUNT_ID")
+          source_name=$(cut -d/ -f9 <<<"$SOURCE_ACCOUNT_ID")
+          [[ -n "$source_rg" && -n "$source_name" ]] || { echo 'Invalid source account resource ID' >&2; exit 1; }
+          echo "SOURCE_RESOURCE_GROUP=$source_rg" >> "$GITHUB_ENV"
+          echo "SOURCE_ACCOUNT_NAME=$source_name" >> "$GITHUB_ENV"
+      - name: Validate Bicep
+        run: |
+          az bicep restore --file infra/deployment/production-integration.bicep
+          az bicep lint --file infra/deployment/production-integration.bicep
+          az bicep build --file infra/deployment/production-integration.bicep --stdout >/dev/null
+      - name: Verify pending connection
+        env:
+          INPUT_PE_NAME: ${{ inputs.cosmos_private_endpoint_name }}
+          INPUT_PE_RESOURCE_ID: ${{ inputs.cosmos_private_endpoint_resource_id }}
+        run: |
+          actual=$(az cosmosdb private-endpoint-connection show \
+            --resource-group "$SOURCE_RESOURCE_GROUP" \
+            --account-name "$SOURCE_ACCOUNT_NAME" \
+            --name "$INPUT_PE_NAME" \
+            --query privateEndpoint.id --output tsv)
+          expected="$INPUT_PE_RESOURCE_ID"
+          test "${actual,,}" = "${expected,,}"
+      - name: What-if
+        env:
+          ALLOW_ROLE_ASSIGNMENT_CHANGES: '1'
+          INPUT_BACKUP_PRINCIPAL_ID: ${{ inputs.backup_identity_principal_id }}
+          INPUT_PE_NAME: ${{ inputs.cosmos_private_endpoint_name }}
+          INPUT_PE_RESOURCE_ID: ${{ inputs.cosmos_private_endpoint_resource_id }}
+        run: |
+          name="source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          az deployment group what-if --name "$name" --resource-group "$SOURCE_RESOURCE_GROUP" \
+            --template-file infra/deployment/production-integration.bicep \
+            --parameters sourceCosmosAccountResourceId="$SOURCE_ACCOUNT_ID" \
+              backupIdentityPrincipalId="$INPUT_BACKUP_PRINCIPAL_ID" \
+              cosmosPrivateEndpointName="$INPUT_PE_NAME" \
+              cosmosPrivateEndpointResourceId="$INPUT_PE_RESOURCE_ID" \
+            --result-format FullResourcePayloads --output json > what-if.json
+          python3 scripts/guard-what-if.py what-if.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-what-if-${{ github.run_id }}
+          retention-days: 30
+          path: what-if.json
+      - name: Deploy
+        if: inputs.apply
+        env:
+          INPUT_BACKUP_PRINCIPAL_ID: ${{ inputs.backup_identity_principal_id }}
+          INPUT_PE_NAME: ${{ inputs.cosmos_private_endpoint_name }}
+          INPUT_PE_RESOURCE_ID: ${{ inputs.cosmos_private_endpoint_resource_id }}
+        run: |
+          name="source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          az deployment group create --name "$name" --resource-group "$SOURCE_RESOURCE_GROUP" \
+            --template-file infra/deployment/production-integration.bicep \
+            --parameters sourceCosmosAccountResourceId="$SOURCE_ACCOUNT_ID" \
+              backupIdentityPrincipalId="$INPUT_BACKUP_PRINCIPAL_ID" \
+              cosmosPrivateEndpointName="$INPUT_PE_NAME" \
+              cosmosPrivateEndpointResourceId="$INPUT_PE_RESOURCE_ID" \
+            --output json > deployment.json
+      - name: Upload deployment outputs
+        if: inputs.apply
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-deployment-${{ github.run_id }}
+          retention-days: 30
+          path: deployment.json

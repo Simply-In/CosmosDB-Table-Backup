@@ -1,0 +1,55 @@
+name: Deploy job image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Immutable ACR image reference to promote or roll back to
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  SUBSCRIPTION_ID: ${{ vars.AZURE_BACKUP_SUBSCRIPTION_ID }}
+  TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  BACKUP_JOB_NAME: ${{ vars.BACKUP_JOB_NAME }}
+  RESTORE_JOB_NAME: ${{ vars.RESTORE_JOB_NAME }}
+  IMAGE: ${{ inputs.image }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release configuration
+        run: |
+          : "${SUBSCRIPTION_ID:?Set AZURE_BACKUP_SUBSCRIPTION_ID in the release environment}"
+          : "${TENANT_ID:?Set AZURE_TENANT_ID in the release environment}"
+          : "${AZURE_RESOURCE_GROUP:?Set AZURE_RESOURCE_GROUP in the release environment}"
+          : "${ACR_LOGIN_SERVER:?Set ACR_LOGIN_SERVER in the release environment}"
+          : "${BACKUP_JOB_NAME:?Set BACKUP_JOB_NAME in the release environment}"
+          : "${RESTORE_JOB_NAME:?Set RESTORE_JOB_NAME in the release environment}"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_RELEASE_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+      - name: Deploy and verify immutable image
+        run: ./scripts/deploy-job-image.sh
+      - name: Record deployed image
+        run: printf '%s\n' "$IMAGE" > deployed-image.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deployed-image-${{ github.run_id }}
+          retention-days: 90
+          path: deployed-image.txt
