@@ -35,7 +35,12 @@ def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {Path(sys.argv[0]).name} WHAT_IF_JSON")
     data = json.loads(Path(sys.argv[1]).read_text())
-    changes = data.get("changes", data.get("properties", {}).get("changes", []))
+    if isinstance(data, list):
+        changes = data
+    elif isinstance(data, dict):
+        changes = data.get("changes", data.get("properties", {}).get("changes", []))
+    else:
+        raise SystemExit("What-if JSON must be an object or array")
     failures: list[str] = []
     allow_rbac = os.getenv("ALLOW_ROLE_ASSIGNMENT_CHANGES") == "1"
 

@@ -103,8 +103,14 @@ jobs:
               restoreScheduleEnabled="$INPUT_ENABLE_RESTORE" \
               restoreAccessEnabled="$INPUT_ENABLE_RESTORE" \
             --result-format FullResourcePayloads --output json > what-if.json
-          # Azure CLI may output only whitespace when What-if finds no changes.
-          [[ -n "$(tr -d '[:space:]' < what-if.json)" ]] || printf '[]\n' > what-if.json
+          # Azure CLI can emit a UTF-8 BOM or whitespace for an empty What-if response.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('what-if.json')
+          payload = path.read_text(encoding='utf-8-sig').strip()
+          path.write_text(payload or '[]\n')
+          PY
           python3 scripts/guard-what-if.py what-if.json
       - name: Upload what-if
         uses: actions/upload-artifact@v7
