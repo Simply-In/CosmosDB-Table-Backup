@@ -43,6 +43,7 @@ stateDiagram-v2
     DailyBackupEnabled --> DailyBackupEnabled: each scheduled run commits
 
     Committed --> RestoreAccessEnabled: enable restore access only
+    DailyBackupEnabled --> RestoreAccessEnabled: enable restore access only
     RestoreAccessEnabled --> RestoreOnDemand: start validation manually
     RestoreOnDemand --> Evidence: validate counts and hashes
     Evidence --> RestoreAccepted: pass restore acceptance gate
