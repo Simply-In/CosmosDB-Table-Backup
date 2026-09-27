@@ -1,44 +1,232 @@
-# Operations
+# Backup and restore runbooks
 
-## Run contract
+These runbooks operate the deployed platform described in [Deployment and CI/CD](deployment.md). They do not define the backup wire format or cryptography; [Backup format v1](backup-format.md) is authoritative. Apply the [security invariants](security.md) throughout.
 
-A successful run discovers current tables, excludes exact case-sensitive `cards`, exports every included table, uploads encrypted table objects, then writes the encrypted manifest. No manifest means the run is incomplete and must not be restored.
+## Operating model and gates
 
-The export is a logical per-table scan; it is not a globally point-in-time-consistent snapshot across tables.
+Both Azure Container Apps Jobs exist after the first infrastructure deployment. Their mode is controlled by Bicep:
 
-## Pre-deployment checks
+| Operation | `scheduleEnabled` | `restoreAccessEnabled` | `restoreScheduleEnabled` | Effective job mode |
+|---|---:|---:|---:|---|
+| On-demand backup before acceptance | `false` | `false` | `false` | Backup is manual; restore is manual but has no conditional backup/key/target access |
+| Daily backup | `true` | `false` | `false` | Backup uses the configured UTC cron (nonprod default `0 2 * * *`) |
+| On-demand restore acceptance | either | `true` | `false` | Restore stays manual and receives conditional access |
+| Monthly restore validation | either | `true` | `true` | Restore uses UTC cron (default `0 4 1 * *`) |
+
+The schedules are disabled by default. Manual restore requires `restoreAccessEnabled=true`; `restoreScheduleEnabled` can and should remain false during acceptance. Monthly restore requires both values true. The `deploy-backup.yml` input `enable_restore_validation` sets both together, so it is only for post-acceptance monthly mode—not the initial manual test.
+
+Set these shell variables for the examples:
 
 ```bash
-./scripts/preflight.sh
+export AZURE_BACKUP_SUBSCRIPTION_ID='<backup-subscription-id>'
+export AZURE_RESOURCE_GROUP='<backup-resource-group>'
+export AZURE_LOCATION='<azure-region>'
+export SOURCE_COSMOS_ACCOUNT_RESOURCE_ID='<full-source-account-resource-id>'
+export BACKUP_JOB_NAME='<prefix>-daily-backup'
+export RESTORE_JOB_NAME='<prefix>-monthly-restore-test'
+export IMAGE='<registry>.azurecr.io/cosmos-table-backup@sha256:<digest>'
 ```
 
-Confirm naming prefix, resource group, VNet/subnet CIDRs, tags, daily UTC schedule, action group, source RU budget/window, storage redundancy, and GitHub environment approvers before applying a deployment.
+## Backup runbook
 
-## Phase 1 acceptance
+### Run an on-demand backup
 
-1. Deploy without relaxing private networking or RBAC.
+1. Confirm [source integration](deployment.md#deploy-source-integrationyml--deploy-source-integration) is applied, private DNS resolves the source Table endpoint from the workload network, the job uses the approved digest, and no previous execution is still running.
+2. Start the job. A manual start is allowed whether its configured trigger is Manual or Schedule:
+
+   ```bash
+   az containerapp job start \
+     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+     --resource-group "$AZURE_RESOURCE_GROUP" \
+     --name "$BACKUP_JOB_NAME"
+   ```
+
+3. Track execution state:
+
+   ```bash
+   az containerapp job execution list \
+     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+     --resource-group "$AZURE_RESOURCE_GROUP" \
+     --name "$BACKUP_JOB_NAME" \
+     --output table
+   ```
+
+4. In workspace-backed Application Insights/Log Analytics, correlate by backup ID and confirm one `backup.completed` event. Completion is emitted only after `manifest.enc` commits. Never infer success from a successful table upload, container exit alone, or a partial `backups/<uuid>/` prefix.
+
+The run discovers tables afresh, excludes exact case-sensitive `cards` before opening its table client, and fails if discovery fails or no included table remains. It streams a logical per-table scan; tables are not captured at one cross-table point in time.
+
+```mermaid
+sequenceDiagram
+    participant J as Backup Job
+    participant C as Source Table API
+    participant K as Key Vault HSM key
+    participant B as Immutable Blob container
+    participant M as Azure Monitor
+    J->>C: Discover tables and read entities
+    J->>K: Wrap new per-run DEK
+    loop Each included table
+        J->>B: Create numbered AES-GCM object
+    end
+    J->>B: Create bootstrap.json
+    J->>B: Commit encrypted manifest.enc last
+    J->>M: Emit backup.completed
+```
+
+### Accept backup before enabling the schedule
+
+Complete and record this gate in nonproduction:
+
+1. Inspect the guarded deployment what-if; do not relax private networking or RBAC.
 2. Verify private DNS from the Container Apps environment.
-3. Run one manual backup.
-4. Observe two consecutive scheduled backups.
-5. Inject one controlled failed run and verify failure alerting.
-6. Verify the 26-hour dead-man alert.
-7. Review source request units, latency, and throttling during export.
-8. Run the negative permission tests in `docs/security.md`.
-9. Validate lifecycle behavior before locking immutability.
+3. Complete one bounded manual backup and prove that `cards` is absent.
+4. Confirm the committed manifest and encrypted objects follow [Backup format v1](backup-format.md).
+5. Observe two consecutive scheduled backups after a reviewed temporary schedule enablement, or otherwise exercise the intended schedule under the change procedure.
+6. Cause one controlled, reversible failure and verify the `backup.failed` alert; restore the valid configuration immediately.
+7. Verify the 26-hour `backup.completed` dead-man alert behavior.
+8. Review source request units, latency, and throttling during export.
+9. Run the [required negative tests](security.md#required-negative-tests).
+10. Validate version-level immutability and lifecycle behavior before the separate irreversible decision to lock the policy.
 
-## Incident triage
+After acceptance, dispatch **Deploy backup platform** with `enable_schedule=true`, `enable_restore_validation=false`, and `apply=false`. Review `backup-what-if-*`, then repeat with `apply=true`. Do not enable a schedule while the placeholder image is present.
 
-- **No manifest:** treat the run as failed. Preserve partial blobs for investigation and allow lifecycle cleanup.
-- **401/403 from Cosmos:** check the Table data-plane role assignment and managed-identity audience; never enable keys.
-- **Name resolution failure:** check private DNS links and endpoint approval; never enable public access as a workaround.
-- **429 from Cosmos:** reduce page size/concurrency or move the schedule; do not exceed the agreed source RU budget.
-- **Key Vault wrap failure:** verify the versioned HSM key is enabled and the backup identity has only wrap permission.
-- **Blob conflict:** use a new run ID. Never overwrite an existing immutable object.
+### Monitor backup
 
-Logs must not contain entity values, wrapped-key plaintext, tokens, or connection strings. Correlate by run ID, table name, object path, counts, durations, and sanitized Azure error codes.
+The platform creates these always-enabled scheduled-query alerts:
 
-## Phase 2 restore validation
+- **backup failure:** severity 1, evaluated every 5 minutes over 10 minutes, when `backup.failed` appears;
+- **backup dead-man:** severity 0, evaluated hourly, when no `backup.completed` appears for 26 hours (query override range 48 hours).
 
-Restore uses a separate dormant identity with unwrap, backup-read, and isolated-target-only write permissions. The restore CLI rejects source/target equality, incomplete runs, unauthenticated ciphertext, and missing explicit confirmation. It emits count and deterministic-hash evidence without entity values.
+The action group uses configured `alertEmails`; the nonproduction default is empty, so alerts exist without email recipients. Validate alert queries against actual `AppTraces` ingestion before enabling the schedule. Logs may contain run ID, table name, object path, counts, duration, status, and sanitized error type/code. They must not contain entity values, plaintext/wrapped keys, access tokens, SAS tokens, or connection strings.
 
-The monthly restore job and its access assignments are disabled by default. Enable `restoreAccessEnabled` and `restoreScheduleEnabled` together only after a manual isolated restore succeeds. After an access window, explicitly remove the conditional restore role assignments because an ordinary incremental ARM deployment does not delete assignments created by an earlier deployment; verify effective access is gone.
+### Triage a failed backup
+
+| Symptom | Action |
+|---|---|
+| No `manifest.enc` | Treat the run as failed. Preserve partial blobs for investigation; lifecycle management handles them later. Never restore the prefix. |
+| Cosmos 401/403 | Check the source Table data-plane reader assignment and managed-identity audience. Do not enable keys. |
+| Name resolution/connectivity | Check private endpoint approval, private DNS links, NSG/platform dependencies, and the source endpoint. Do not enable public access as a workaround. |
+| Cosmos 429 | Reduce configured page size/concurrency or move the schedule; stay inside the accepted RU budget. |
+| Key wrap failure | Confirm the exact versioned HSM key is enabled and the backup identity has metadata/wrap only. |
+| Blob conflict | Use a new run ID. Never overwrite an immutable object. |
+
+## Restore-validation runbook
+
+### Understand the target before enabling access
+
+The dedicated restore account is provisioned **unconditionally** with the platform and persists between tests. It is a private, local-auth-disabled Cosmos DB for Table account in serverless capacity mode, with no fixed provisioned RU/s. Its resource ID must differ from the source, and the runtime repeats that identity/endpoint check before any data-plane operation.
+
+A restore execution never creates the account. It deletes unexpected user tables, then deletes and recreates each manifest table. After success, restored data remains in the persistent test account until an operator cleans it up, runs another validation that recreates it, or tears down the account. It is not a production restore destination.
+
+### Run an on-demand restore validation
+
+1. Choose a successfully committed backup. If no UUID is supplied, the restore selects the `manifest.enc` with the newest Blob `last_modified` value. To test a specific committed backup, retain its UUID for step 4.
+2. Enable access **without** enabling the schedule. Because the current workflow couples the flags, perform the same reviewed subscription deployment locally (or through an equivalently protected approved pipeline):
+
+   ```bash
+   export BACKUP_SCHEDULE_ENABLED='true' # use false if daily backup is not yet accepted
+   export ALLOW_ROLE_ASSIGNMENT_CHANGES=1
+   az deployment sub what-if \
+     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+     --location "$AZURE_LOCATION" \
+     --template-file infra/main.bicep \
+     --parameters infra/parameters/nonprod.bicepparam \
+     --parameters sourceCosmosAccountResourceId="$SOURCE_COSMOS_ACCOUNT_RESOURCE_ID" \
+                  backupImage="$IMAGE" \
+                  scheduleEnabled="$BACKUP_SCHEDULE_ENABLED" \
+                  restoreAccessEnabled=true \
+                  restoreScheduleEnabled=false \
+     --result-format FullResourcePayloads --output json > what-if.json
+   python3 scripts/guard-what-if.py
+   ```
+
+   Review `what-if.json` under the same change-control standard as the protected environment, then replace `what-if` with `create` (and omit `--result-format FullResourcePayloads`) using identical parameters. This creates the four conditional grants: Blob read, key metadata/unwrap, telemetry publishing, and target Cosmos data contribution.
+3. Start the latest committed backup test:
+
+   ```bash
+   az containerapp job start \
+     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+     --resource-group "$AZURE_RESOURCE_GROUP" \
+     --name "$RESTORE_JOB_NAME"
+   ```
+
+   Or pin a committed UUID for this execution:
+
+   ```bash
+   export BACKUP_ID='<committed-backup-uuid>'
+   az containerapp job start \
+     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+     --resource-group "$AZURE_RESOURCE_GROUP" \
+     --name "$RESTORE_JOB_NAME" \
+     --container-name restore-validation \
+     --env-vars RESTORE_BACKUP_ID="$BACKUP_ID"
+   ```
+
+4. Monitor the execution list as for backup, substituting `RESTORE_JOB_NAME`. Inspect the container output for the JSON verification report and query `AppTraces` for exactly one matching `restore.completed`. A missing or nonzero execution, `restore.failed`, or absent report is a failed validation.
+
+```mermaid
+sequenceDiagram
+    actor O as Operator
+    participant R as Restore Job
+    participant B as Immutable backups
+    participant K as Key Vault
+    participant T as Persistent serverless test account
+    O->>R: Start latest or pinned committed backup
+    R->>B: Require manifest.enc; read bootstrap and manifest
+    R->>K: Unwrap DEK from authenticated versioned key ID
+    R->>B: Verify AES-GCM, ETag, byte count, and SHA-256
+    R->>T: Remove unexpected tables
+    loop Each manifest table
+        R->>T: Delete and recreate table
+        R->>T: Restore typed entities
+        R->>T: Re-read count and key/content hashes
+    end
+    R-->>O: JSON evidence and restore.completed
+```
+
+### What a successful restore proves
+
+Before writing a table, the job authenticates the bootstrap-bound encrypted manifest, validates its schema/object paths, unwraps the DEK with RSA-OAEP-256, and reads the immutable table object conditionally against one ETag. It verifies encrypted size/SHA-256 and plaintext SHA-256. It then recreates the table, restores typed records, repeats source-object verification, and re-enumerates the target.
+
+Success requires exact table-set equality and, for every table, equality of manifest entity count, order-independent entity-key hash, and persisted-content hash. The JSON report includes backup ID, target endpoint, table/entity counts, per-table encrypted/plaintext/key/content hashes, and an overall deterministic report hash; it includes no entity values. See [Restore protocol](backup-format.md#restore-protocol) for the authoritative algorithm and failure semantics.
+
+### Accept restore before enabling monthly validation
+
+1. Complete a manual test with `restoreAccessEnabled=true` and `restoreScheduleEnabled=false`.
+2. Confirm isolated source/target IDs, private DNS, keyless access, selected backup UUID, exact table set, counts/hashes, JSON report, and `restore.completed`.
+3. Exercise a controlled failed validation and confirm `restore.failed` alerting.
+4. Review data retention and operator cleanup evidence.
+5. Close the temporary access window and verify the four conditional grants are gone as described below.
+6. Obtain security/operations approval for continuously active restore-only grants.
+7. Dispatch **Deploy backup platform** with `enable_restore_validation=true` and the accepted backup schedule setting, first `apply=false` and then `apply=true` after reviewing the artifact. This enables both restore access and the monthly trigger.
+
+The restore failure alert is always present (severity 1, every 5 minutes over 10 minutes). The 35-day restore success dead-man alert is severity 0, evaluated daily, and exists only while both access and schedule are enabled.
+
+### Clean up restored data and close access
+
+Cleanup is operator-owned. The next restore removes unexpected tables and recreates expected tables, but it does not empty the persistent account after evidence collection. While an approved data-plane identity is available, remove the test tables according to organizational procedure and verify that no user tables remain. Do not grant keys or public access to simplify cleanup.
+
+Redeploy with `restoreAccessEnabled=false` and `restoreScheduleEnabled=false`. **That incremental ARM deployment does not remove conditional role assignments created by an earlier deployment.** Explicitly remove and verify these assignments for the restore identity:
+
+1. Storage Blob Data Reader on the backup container;
+2. the custom `<prefix> Key metadata and unwrap only` assignment on the Key Vault key;
+3. Monitoring Metrics Publisher on Application Insights; and
+4. Cosmos DB built-in data contributor on the restore-test account.
+
+Use assignment IDs from Azure rather than broad name-based deletion, preserve the always-present ACR pull needed to start the dormant job, and record effective-access verification. An Azure Deployment Stack configured to delete resources that become unmanaged is the alternative documented in the [infrastructure reference](../infra/README.md#deployment-order).
+
+### Respond to a failed restore
+
+- Guard/configuration errors exit with code 2; data/authentication/write failures exit nonzero and emit `restore.failed`.
+- A missing committed marker, malformed metadata, wrong key version, nonce/AAD/tag/hash/count mismatch, changed Blob ETag, oversized record, or target write failure must never be overridden.
+- A failure can leave a partially populated recreated table. After correcting the cause, rerun the complete restore; it deletes/recreates that table and repeats every check.
+- Never reinterpret isolated validation as permission or a procedure to write to the production source.
+
+## Teardown
+
+1. Disable both schedules and restore access through reviewed deployment.
+2. Wait for all Container Apps Job executions to finish.
+3. Remove the four conditional restore assignments explicitly and verify the source-side reader/private-endpoint integration is removed under source-subscription change control.
+4. Clean test data. To remove only the restore account, delete it under operator approval; because it is an unconditional Bicep resource, any later full platform deployment recreates it.
+5. Before deleting the platform/resource group, account for immutable backup retention, soft delete/purge protection, source integration, DNS/private endpoints, alerting, and evidence-retention requirements. Do not attempt to bypass locked WORM retention.
+
+Return to [Deployment and CI/CD](deployment.md) for promotion/rollback and production fork procedures, or [Security invariants](security.md) for negative tests and release blockers.
