@@ -1,5 +1,9 @@
 # Security invariants
 
+> **Navigation:** [Business overview](../README.md) · [Deployment](deployment.md) · [Operations](operations.md) · [Backup format](backup-format.md) · [Infrastructure](../infra/README.md)
+>
+> This document is authoritative for release-blocking security and trust-boundary invariants.
+
 The deployment must fail closed. These invariants are release blockers:
 
 1. Runtime authentication uses managed identities only. Cosmos keys, storage keys, SAS tokens, client secrets, and credentials in settings are forbidden.

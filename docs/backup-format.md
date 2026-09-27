@@ -1,5 +1,9 @@
 # Backup format v1
 
+> **Navigation:** [Business overview](../README.md) · [Deployment](deployment.md) · [Operations](operations.md) · [Security invariants](security.md) · [Infrastructure](../infra/README.md)
+>
+> This document is authoritative for the on-wire format, cryptographic construction, completion marker, and restore verification algorithm.
+
 A run uses a UUID backup ID and writes objects under `backups/<backup-id>/`. The only completion marker is a successfully committed `manifest.enc`; consumers must ignore a prefix without it. Every commit is create-only (`If-None-Match: *`). Table objects are numbered so table names are not exposed in object paths.
 
 ## Cryptography

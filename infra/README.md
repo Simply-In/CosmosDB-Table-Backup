@@ -1,5 +1,7 @@
 # Phase 1 backup and Phase 2 restore-validation infrastructure
 
+> **Navigation:** [Business overview](../README.md) · [Deployment guide](../docs/deployment.md) · [Operations runbooks](../docs/operations.md) · [Backup format](../docs/backup-format.md) · [Security invariants](../docs/security.md)
+
 This directory composes the isolated backup subscription, dormant-by-default restore validation, and the independently authorized source-subscription integration. All reusable resource types use explicitly pinned Azure Verified Modules (AVM); native Bicep is limited to custom least-privilege role definitions, Cosmos private-endpoint approval/data-plane assignment, and Azure Monitor scheduled-query alerts where no suitable AVM resource module exists.
 
 ## Deployment order
@@ -67,7 +69,7 @@ az deployment sub what-if \
 
 ## Phase 2 restore boundary
 
-- On the initial deployment, the restore UAMI is created with `restoreAccessEnabled=false`, receives no Blob, Key Vault, ACR, monitoring-publish, or Cosmos data-plane assignments, and is tagged dormant. After it has ever been enabled, a normal incremental deployment does not delete omitted assignments; use explicit RBAC removal or Deployment Stack unmanage deletion as described above.
+- On the initial deployment, the restore UAMI is created with `restoreAccessEnabled=false`, receives the always-present ACR pull needed by its dormant job but no Blob, Key Vault, monitoring-publish, or Cosmos data-plane assignments, and is tagged dormant. After conditional access has ever been enabled, a normal incremental deployment does not delete omitted assignments; use explicit RBAC removal or Deployment Stack unmanage deletion as described above.
 - When activated, it receives Blob Data Reader only on the backup container, a custom key-metadata/unwrap-only role only on the versioned HSM key, ACR pull, telemetry publishing, and Cosmos built-in Data Contributor only on the generated restore-test account. It receives no source-account permission.
 - The backup UAMI is unchanged: it cannot read backup blobs, unwrap keys, or write to the restore account.
 - The restore target is a dedicated serverless Cosmos DB for Table account with public networking, local/key authentication, and key-based metadata writes disabled. Its Table endpoint uses a private endpoint and the isolated VNet's private DNS zone.
