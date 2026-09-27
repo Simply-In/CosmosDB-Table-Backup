@@ -40,5 +40,6 @@ def test_streaming_is_bounded_and_commit_is_create_only() -> None:
 
 
 def test_commit_failure_is_wrapped() -> None:
+    writer = BlockBlobWriter(Blob(fail=True), 4)
     with pytest.raises(StorageError, match="create-only"):
-        BlockBlobWriter(Blob(fail=True), 4).commit()
+        writer.commit()

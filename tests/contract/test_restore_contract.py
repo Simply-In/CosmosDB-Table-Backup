@@ -358,10 +358,11 @@ def test_unexpected_target_table_must_be_deleted_and_absent() -> None:
     crypto = Mock()
     crypto.unwrap_key.return_value = SimpleNamespace(key=DEK)
     raw_logger = Mock()
+    runner = RestoreRunner(
+        config(), Source(objects), target, crypto_factory(crypto), SafeLogger(raw_logger)
+    )
     with pytest.raises(RestoreError, match="unexpected target tables remain"):
-        RestoreRunner(
-            config(), Source(objects), target, crypto_factory(crypto), SafeLogger(raw_logger)
-        ).run()
+        runner.run()
     events = [call.args[0] for call in raw_logger.info.call_args_list]
     assert any('"event":"restore.failed"' in event for event in events)
     assert all('"event":"restore.completed"' not in event for event in events)
@@ -372,14 +373,15 @@ def test_actual_target_key_mismatch_fails_before_completion() -> None:
     crypto = Mock()
     crypto.unwrap_key.return_value = SimpleNamespace(key=DEK)
     raw_logger = Mock()
+    runner = RestoreRunner(
+        config(),
+        Source(objects),
+        ExtraKeyTarget(),
+        crypto_factory(crypto),
+        SafeLogger(raw_logger),
+    )
     with pytest.raises(RestoreError, match="target table content"):
-        RestoreRunner(
-            config(),
-            Source(objects),
-            ExtraKeyTarget(),
-            crypto_factory(crypto),
-            SafeLogger(raw_logger),
-        ).run()
+        runner.run()
     events = [call.args[0] for call in raw_logger.info.call_args_list]
     assert sum('"event":"restore.failed"' in event for event in events) == 1
     assert all('"event":"restore.completed"' not in event for event in events)
@@ -396,10 +398,11 @@ def test_tampering_fails_closed_before_success_report(object_suffix: str) -> Non
     crypto = Mock()
     crypto.unwrap_key.return_value = SimpleNamespace(key=DEK)
     raw_logger = Mock()
+    runner = RestoreRunner(
+        config(), Source(objects), target, crypto_factory(crypto), SafeLogger(raw_logger)
+    )
     with pytest.raises((RestoreError, InvalidTag)):
-        RestoreRunner(
-            config(), Source(objects), target, crypto_factory(crypto), SafeLogger(raw_logger)
-        ).run()
+        runner.run()
     assert target.tables == {}
     events = [call.args[0] for call in raw_logger.info.call_args_list]
     assert sum('"event":"restore.failed"' in event for event in events) == 1
@@ -411,8 +414,9 @@ def test_partial_run_without_manifest_is_never_read_or_restored() -> None:
     source = Source(objects, marker=False)
     target = Target()
     factory = Mock()
+    runner = RestoreRunner(config(), source, target, factory, SafeLogger(Mock()))
     with pytest.raises(RestoreError, match="no committed manifest"):
-        RestoreRunner(config(), source, target, factory, SafeLogger(Mock())).run()
+        runner.run()
     assert source.reads == []
     assert target.tables == {}
     factory.assert_not_called()

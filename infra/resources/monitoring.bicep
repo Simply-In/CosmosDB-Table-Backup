@@ -30,8 +30,8 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 resource failureAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: '${prefix}-backup-failure'
   location: location
-  tags: tags
   kind: 'LogAlert'
+  tags: tags
   properties: {
     displayName: 'Cosmos Table backup failure'
     description: 'A backup execution emitted backup.failed.'
@@ -59,8 +59,8 @@ resource failureAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 resource deadmanAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: '${prefix}-backup-deadman'
   location: location
-  tags: tags
   kind: 'LogAlert'
+  tags: tags
   properties: {
     displayName: 'No committed Cosmos Table backup for 26 hours'
     description: 'No backup.completed event tied to a committed final manifest was observed.'
@@ -91,8 +91,8 @@ resource deadmanAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 resource restoreFailureAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: '${prefix}-restore-failure'
   location: location
-  tags: tags
   kind: 'LogAlert'
+  tags: tags
   properties: {
     displayName: 'Cosmos Table restore validation failure'
     description: 'A restore-validation execution emitted restore.failed.'
@@ -120,8 +120,8 @@ resource restoreFailureAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
 resource restoreDeadmanAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = if (restoreScheduleEnabled) {
   name: '${prefix}-restore-deadman'
   location: location
-  tags: tags
   kind: 'LogAlert'
+  tags: tags
   properties: {
     displayName: 'No successful monthly Cosmos Table restore validation'
     description: 'No restore.completed event was observed in the last 35 days.'

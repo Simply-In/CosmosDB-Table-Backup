@@ -9,7 +9,8 @@ command -v az >/dev/null || { echo "Azure CLI is required" >&2; exit 1; }
 az account show --output none >/dev/null || { echo "Run 'az login' first" >&2; exit 1; }
 
 tenant() {
-  az account show --subscription "$1" --query tenantId --output tsv
+  local subscription="$1"
+  az account show --subscription "$subscription" --query tenantId --output tsv
 }
 
 TARGET_TENANT="$(tenant "$TARGET_SUBSCRIPTION")"

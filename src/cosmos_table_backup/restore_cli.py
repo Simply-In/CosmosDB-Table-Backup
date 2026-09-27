@@ -15,7 +15,13 @@ from cosmos_table_backup.config import ConfigurationError
 from cosmos_table_backup.restore import RestoreRunner
 from cosmos_table_backup.restore_config import RestoreConfig
 from cosmos_table_backup.restore_storage import AzureRestoreSource
-from cosmos_table_backup.telemetry import configure_logging, configure_monitor_export
+from cosmos_table_backup.telemetry import SafeLogger, configure_logging, configure_monitor_export
+
+_RESTORE_FAILED_EVENT = "restore.failed"
+
+
+def _emit_failure(logger: SafeLogger, exc: Exception) -> None:
+    logger.emit(_RESTORE_FAILED_EVENT, status="failed", error_type=type(exc).__name__)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -33,12 +39,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             credential = DefaultAzureCredential(managed_identity_client_id=client_id)
             configure_monitor_export(credential, connection_string)
         except Exception as exc:
-            logger.emit("restore.failed", status="failed", error_type=type(exc).__name__)
+            _emit_failure(logger, exc)
             return 1
     try:
         config = RestoreConfig.from_env()
     except ConfigurationError as exc:
-        logger.emit("restore.failed", status="failed", error_type=type(exc).__name__)
+        _emit_failure(logger, exc)
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
     logger = configure_logging(config.log_level)
@@ -72,7 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except Exception as exc:
         if not runner_started:
-            logger.emit("restore.failed", status="failed", error_type=type(exc).__name__)
+            _emit_failure(logger, exc)
         return 1
 
 

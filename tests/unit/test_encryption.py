@@ -107,8 +107,9 @@ def test_nonce_factory_rejects_reuse_and_encryptor_lifecycle(
     factory = NonceFactory()
     assert factory.generate() == b"x" * 12
     assert factory.generate() == b"y" * 12
+    sink = Sink()
     with pytest.raises(CryptoError):
-        ObjectEncryptor(b"short", b"n" * 12, b"", Sink())
+        ObjectEncryptor(b"short", b"n" * 12, b"", sink)
     encryptor = ObjectEncryptor(b"k" * 32, b"n" * 12, b"", Sink())
     encryptor.finalize()
     with pytest.raises(CryptoError):
