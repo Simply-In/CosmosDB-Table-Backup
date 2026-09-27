@@ -22,7 +22,9 @@ cosmos-table-restore = "cosmos_table_backup.restore_cli:main"
 
 [dependency-groups]
 dev = [
+  "bandit==1.9.4",
   "mypy==1.18.2",
+  "pip-audit==2.10.1",
   "pytest==9.1.1",
   "pytest-cov==7.0.0",
   "ruff==0.14.3",

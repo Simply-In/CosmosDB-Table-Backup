@@ -94,8 +94,9 @@ def test_batching_is_bounded_partition_safe_and_idempotent_upsert() -> None:
 
 
 def test_batcher_requires_keys() -> None:
+    writer = EntityBatchWriter(Mock(), 1, 64 * 1024)
     with pytest.raises(RestoreError):
-        EntityBatchWriter(Mock(), 1, 64 * 1024).add({"PartitionKey": "p"})
+        writer.add({"PartitionKey": "p"})
 
 
 def test_batching_never_exceeds_100_operations() -> None:
@@ -152,8 +153,9 @@ def test_unicode_batches_fit_estimate_and_real_sdk_request_limit() -> None:
 
 
 def test_batch_payload_ceiling_cannot_exceed_1_5_mb() -> None:
+    table = Table()
     with pytest.raises(RestoreError, match=r"at most 1\.5 MB"):
-        EntityBatchWriter(Table(), 100, 1_500_001)
+        EntityBatchWriter(table, 100, 1_500_001)
 
 
 def test_oversized_entity_is_submitted_individually() -> None:
@@ -175,8 +177,9 @@ def test_json_lines_are_streamed_with_a_strict_bound() -> None:
     decoder.write(b"wo\n")
     decoder.finalize()
     assert records == [b"one", b"two"]
+    bounded_decoder = JsonLineDecoder(2, lambda _: None)
     with pytest.raises(RestoreError):
-        JsonLineDecoder(2, lambda _: None).write(b"toolong")
+        bounded_decoder.write(b"toolong")
     incomplete = JsonLineDecoder(10, lambda _: None)
     incomplete.write(b"partial")
     with pytest.raises(RestoreError):

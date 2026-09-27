@@ -149,17 +149,19 @@ def test_complete_backup_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all('"event":"backup.failed"' not in event for event in events)
 
     changed_bootstrap = {**bootstrap, "key_id": "https://attacker.invalid/keys/k/v"}
+    changed_bootstrap_bytes = canonical_json(changed_bootstrap)
     with pytest.raises(InvalidTag):
-        decrypt_object(b"d" * 32, encoded_manifest, canonical_json(changed_bootstrap))
+        decrypt_object(b"d" * 32, encoded_manifest, changed_bootstrap_bytes)
 
 
 def test_any_read_failure_leaves_no_completion_marker() -> None:
     blobs = Container()
     raw_logger = Mock()
+    runner = BackupRunner(
+        config(), Tables(fail_query=True), blobs, crypto(), SafeLogger(raw_logger)
+    )
     with pytest.raises(BackupError):
-        BackupRunner(
-            config(), Tables(fail_query=True), blobs, crypto(), SafeLogger(raw_logger)
-        ).run()
+        runner.run()
     assert not any(name.endswith("manifest.enc") for name in blobs.objects)
     assert not any(name.endswith("bootstrap.json") for name in blobs.objects)
     events = [call.args[0] for call in raw_logger.info.call_args_list]

@@ -102,6 +102,39 @@ def decrypt_object(dek: bytes, encoded: bytes, aad: bytes) -> bytes:
     return decryptor.update(body) + decryptor.finalize()
 
 
+def _start_chunk_decryptor(
+    dek: bytes,
+    pending: bytearray,
+    aad: bytes,
+    expected_nonce: bytes | None,
+) -> Any:
+    if not pending.startswith(OBJECT_MAGIC):
+        raise CryptoError("invalid encrypted object framing")
+    offset = len(OBJECT_MAGIC)
+    nonce = bytes(pending[offset : offset + NONCE_SIZE])
+    if expected_nonce is not None and nonce != expected_nonce:
+        raise CryptoError("encrypted object nonce does not match bootstrap")
+    del pending[: offset + NONCE_SIZE]
+    decryptor = Cipher(algorithms.AES(dek), modes.GCM(nonce)).decryptor()
+    decryptor.authenticate_additional_data(aad)
+    return decryptor
+
+
+def _decrypt_pending(
+    decryptor: Any,
+    pending: bytearray,
+    plaintext_hash: Any,
+    emit: Callable[[bytes], None],
+) -> None:
+    if len(pending) <= TAG_SIZE:
+        return
+    ciphertext = bytes(pending[:-TAG_SIZE])
+    del pending[:-TAG_SIZE]
+    plaintext = decryptor.update(ciphertext)
+    plaintext_hash.update(plaintext)
+    emit(plaintext)
+
+
 def decrypt_chunks(
     dek: bytes,
     chunks: Iterable[bytes],
@@ -123,21 +156,9 @@ def decrypt_chunks(
         byte_count += len(chunk)
         pending.extend(chunk)
         if decryptor is None and len(pending) >= len(OBJECT_MAGIC) + NONCE_SIZE:
-            if not pending.startswith(OBJECT_MAGIC):
-                raise CryptoError("invalid encrypted object framing")
-            offset = len(OBJECT_MAGIC)
-            nonce = bytes(pending[offset : offset + NONCE_SIZE])
-            if expected_nonce is not None and nonce != expected_nonce:
-                raise CryptoError("encrypted object nonce does not match bootstrap")
-            del pending[: offset + NONCE_SIZE]
-            decryptor = Cipher(algorithms.AES(dek), modes.GCM(nonce)).decryptor()
-            decryptor.authenticate_additional_data(aad)
-        if decryptor is not None and len(pending) > TAG_SIZE:
-            ciphertext = bytes(pending[:-TAG_SIZE])
-            del pending[:-TAG_SIZE]
-            plaintext = decryptor.update(ciphertext)
-            plaintext_hash.update(plaintext)
-            emit(plaintext)
+            decryptor = _start_chunk_decryptor(dek, pending, aad, expected_nonce)
+        if decryptor is not None:
+            _decrypt_pending(decryptor, pending, plaintext_hash, emit)
     if decryptor is None or len(pending) != TAG_SIZE:
         raise CryptoError("truncated encrypted object")
     final = decryptor.finalize_with_tag(bytes(pending))

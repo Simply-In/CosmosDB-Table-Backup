@@ -41,8 +41,9 @@ def test_cards_and_configured_names_are_excluded_before_any_read() -> None:
 
 @pytest.mark.parametrize("names", [[], ["cards"]])
 def test_missing_or_excluded_only_discovery_fails(names: list[str]) -> None:
+    service = Service(names)
     with pytest.raises(DiscoveryError):
-        discover_tables(Service(names))
+        discover_tables(service)
 
 
 def test_discovery_exception_is_safe() -> None:

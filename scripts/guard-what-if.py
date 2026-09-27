@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 BLOCKED_CHANGE_TYPES = {"Delete", "Unsupported"}
+WHAT_IF_PATH = Path("what-if.json")
 PUBLIC_PATH_FRAGMENTS = (
     "publicnetworkaccess",
     "allowblobpublicaccess",
@@ -31,10 +32,8 @@ def public_access_relaxed(path: str, before: object, after: object) -> bool:
     return after_value == "enabled" and normalized(before) != "enabled"
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"Usage: {Path(sys.argv[0]).name} WHAT_IF_JSON")
-    payload = Path(sys.argv[1]).read_text(encoding="utf-8-sig").strip().lstrip("\ufeff").strip()
+def load_changes(path: Path) -> list[dict[str, object]]:
+    payload = path.read_text(encoding="utf-8-sig").strip().lstrip("\ufeff").strip()
     try:
         data = json.loads(payload or "[]")
     except json.JSONDecodeError as error:
@@ -44,39 +43,48 @@ def main() -> int:
             f"({len(payload)} characters; initial code points: {code_points or '<empty>'}): {error}"
         ) from error
     if isinstance(data, list):
-        changes = data
-    elif isinstance(data, dict):
-        changes = data.get("changes", data.get("properties", {}).get("changes", []))
-    else:
-        raise SystemExit("What-if JSON must be an object or array")
-    failures: list[str] = []
+        return data
+    if isinstance(data, dict):
+        return data.get("changes", data.get("properties", {}).get("changes", []))
+    raise SystemExit("What-if JSON must be an object or array")
+
+
+def delta_failures(resource_id: str, delta: dict[str, object]) -> list[str]:
+    path = str(delta.get("path", ""))
+    before = delta.get("before")
+    after = delta.get("after")
+    failures = []
+    if public_access_relaxed(path, before, after):
+        failures.append(f"Public access relaxation at {resource_id}: {path}")
+    if "securityrules" in path.lower() and normalized(after) in {"allow", "*", "internet"}:
+        failures.append(f"Potential NSG relaxation at {resource_id}: {path}")
+    return failures
+
+
+def change_failures(change: dict[str, object], allow_rbac: bool) -> list[str]:
+    resource_id = str(change.get("resourceId", "<unknown>"))
+    change_type = str(change.get("changeType", "Unknown"))
+    resource_type = resource_id.lower()
+    is_role_assignment = "roleassignments" in resource_type
+    reviewed_unsupported_rbac = change_type == "Unsupported" and is_role_assignment and allow_rbac
+    failures = []
+    if change_type in BLOCKED_CHANGE_TYPES and not reviewed_unsupported_rbac:
+        failures.append(f"{change_type}: {resource_id}")
+    if change_type == "Create" and "/virtualnetworkpeerings/" in resource_type:
+        failures.append(f"VNet peering creation: {resource_id}")
+    if change_type in {"Create", "Modify"} and is_role_assignment and not allow_rbac:
+        failures.append(f"RBAC change requires explicit review: {resource_id}")
+    for delta in change.get("delta") or []:
+        failures.extend(delta_failures(resource_id, delta))
+    return failures
+
+
+def main() -> int:
+    if len(sys.argv) != 1:
+        raise SystemExit(f"Usage: {Path(sys.argv[0]).name}")
+    changes = load_changes(WHAT_IF_PATH)
     allow_rbac = os.getenv("ALLOW_ROLE_ASSIGNMENT_CHANGES") == "1"
-
-    for change in changes:
-        resource_id = change.get("resourceId", "<unknown>")
-        change_type = change.get("changeType", "Unknown")
-        resource_type = resource_id.lower()
-        is_role_assignment = "roleassignments" in resource_type
-        reviewed_unsupported_rbac = (
-            change_type == "Unsupported" and is_role_assignment and allow_rbac
-        )
-        if change_type in BLOCKED_CHANGE_TYPES and not reviewed_unsupported_rbac:
-            failures.append(f"{change_type}: {resource_id}")
-        if change_type == "Create" and "/virtualnetworkpeerings/" in resource_type:
-            failures.append(f"VNet peering creation: {resource_id}")
-        is_rbac_change = change_type in {"Create", "Modify"} and is_role_assignment
-        if is_rbac_change and not allow_rbac:
-            failures.append(f"RBAC change requires explicit review: {resource_id}")
-        for delta in change.get("delta") or []:
-            path = delta.get("path", "")
-            before = delta.get("before")
-            after = delta.get("after")
-            if public_access_relaxed(path, before, after):
-                failures.append(f"Public access relaxation at {resource_id}: {path}")
-            lowered = path.lower()
-            if "securityrules" in lowered and normalized(after) in {"allow", "*", "internet"}:
-                failures.append(f"Potential NSG relaxation at {resource_id}: {path}")
-
+    failures = [failure for change in changes for failure in change_failures(change, allow_rbac)]
     for failure in failures:
         print(f"BLOCKED: {failure}", file=sys.stderr)
     if failures:

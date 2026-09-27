@@ -120,25 +120,29 @@ class OrderIndependentDigest:
             path.unlink()
         return merged_path
 
+    def _consolidate_chunks(self) -> None:
+        while len(self._chunk_paths) > self._MERGE_FAN_IN:
+            merged: list[Path] = []
+            for offset in range(0, len(self._chunk_paths), self._MERGE_FAN_IN):
+                group = self._chunk_paths[offset : offset + self._MERGE_FAN_IN]
+                merged.append(group[0] if len(group) == 1 else self._merge_chunk_group(group))
+            self._chunk_paths = merged
+
+    def _update_from_chunks(self, aggregate: Any) -> None:
+        self._spill_chunk()
+        self._consolidate_chunks()
+        for digest in heapq.merge(*(self._read_chunk(path) for path in self._chunk_paths)):
+            aggregate.update(digest)
+
     def hexdigest(self) -> str:
         if self._closed:
             raise ValueError("digest is closed")
         aggregate = hashlib.sha256()
         try:
-            if not self._chunk_paths:
-                for digest in sorted(self._digests):
-                    aggregate.update(digest)
+            if self._chunk_paths:
+                self._update_from_chunks(aggregate)
             else:
-                self._spill_chunk()
-                while len(self._chunk_paths) > self._MERGE_FAN_IN:
-                    merged: list[Path] = []
-                    for offset in range(0, len(self._chunk_paths), self._MERGE_FAN_IN):
-                        group = self._chunk_paths[offset : offset + self._MERGE_FAN_IN]
-                        merged.append(
-                            group[0] if len(group) == 1 else self._merge_chunk_group(group)
-                        )
-                    self._chunk_paths = merged
-                for digest in heapq.merge(*(self._read_chunk(path) for path in self._chunk_paths)):
+                for digest in sorted(self._digests):
                     aggregate.update(digest)
             return aggregate.hexdigest()
         finally:

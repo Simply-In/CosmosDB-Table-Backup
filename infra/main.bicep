@@ -86,7 +86,6 @@ resource blobWriterRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
           'Microsoft.Storage/storageAccounts/blobServices/read'
           'Microsoft.Storage/storageAccounts/blobServices/containers/read'
         ]
-        notActions: []
         dataActions: [
           'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'
           'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'
@@ -110,8 +109,6 @@ resource keyWrapperRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
     ]
     permissions: [
       {
-        actions: []
-        notActions: []
         dataActions: [
           'Microsoft.KeyVault/vaults/keys/read'
           'Microsoft.KeyVault/vaults/keys/wrap/action'
@@ -135,8 +132,6 @@ resource keyUnwrapperRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' =
     ]
     permissions: [
       {
-        actions: []
-        notActions: []
         dataActions: [
           'Microsoft.KeyVault/vaults/keys/read'
           'Microsoft.KeyVault/vaults/keys/unwrap/action'

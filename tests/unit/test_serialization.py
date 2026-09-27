@@ -74,8 +74,9 @@ def test_order_independent_digest_is_stable_for_shuffled_records() -> None:
     ],
 )
 def test_decode_requires_string_table_keys(entity: dict[str, object]) -> None:
+    encoded = encode_entity(entity)
     with pytest.raises(SerializationError, match=r"PartitionKey|RowKey"):
-        decode_entity(encode_entity(entity))
+        decode_entity(encoded)
 
 
 def test_digest_spills_with_bounded_memory_preserves_duplicates_and_cleans() -> None:
@@ -91,7 +92,8 @@ def test_digest_spills_with_bounded_memory_preserves_duplicates_and_cleans() -> 
         assert digest.in_memory_count < 2
     work_directory = digest.scratch_path
     assert digest.spilled
-    assert work_directory is not None and work_directory.exists()
+    assert work_directory is not None
+    assert work_directory.exists()
     assert digest.hexdigest() == expected
     assert not work_directory.exists()
     scratch_root.rmdir()
@@ -101,20 +103,26 @@ def test_digest_context_cleans_spills_after_error() -> None:
     scratch_root = Path("tests/.digest-error-scratch")
     scratch_root.mkdir(exist_ok=True)
     work_directory: Path | None = None
-    with (
-        pytest.raises(RuntimeError),
-        OrderIndependentDigest(max_digests_in_memory=1, scratch_directory=scratch_root) as digest,
-    ):
-        digest.update(b"record")
-        work_directory = digest.scratch_path
-        raise RuntimeError("stop")
-    assert work_directory is not None and not work_directory.exists()
+    digest = OrderIndependentDigest(max_digests_in_memory=1, scratch_directory=scratch_root)
+
+    def raise_after_spill() -> None:
+        nonlocal work_directory
+        with digest:
+            digest.update(b"record")
+            work_directory = digest.scratch_path
+            raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError):
+        raise_after_spill()
+    assert work_directory is not None
+    assert not work_directory.exists()
     scratch_root.rmdir()
 
 
 def test_rejects_naive_datetime_and_malformed_records() -> None:
+    naive_datetime = datetime(2025, 1, 1)
     with pytest.raises(SerializationError):
-        encode_entity({"x": datetime(2025, 1, 1)})
+        encode_entity({"x": naive_datetime})
     with pytest.raises(SerializationError):
         decode_entity(b"not json")
     with pytest.raises(SerializationError):
