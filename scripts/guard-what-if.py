@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 BLOCKED_CHANGE_TYPES = {"Delete", "Unsupported"}
+WHAT_IF_PATH = Path("what-if.json")
 PUBLIC_PATH_FRAGMENTS = (
     "publicnetworkaccess",
     "allowblobpublicaccess",
@@ -79,9 +80,9 @@ def change_failures(change: dict[str, object], allow_rbac: bool) -> list[str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"Usage: {Path(sys.argv[0]).name} WHAT_IF_JSON")
-    changes = load_changes(Path(sys.argv[1]))
+    if len(sys.argv) != 1:
+        raise SystemExit(f"Usage: {Path(sys.argv[0]).name}")
+    changes = load_changes(WHAT_IF_PATH)
     allow_rbac = os.getenv("ALLOW_ROLE_ASSIGNMENT_CHANGES") == "1"
     failures = [failure for change in changes for failure in change_failures(change, allow_rbac)]
     for failure in failures:

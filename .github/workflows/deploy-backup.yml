@@ -111,7 +111,7 @@ jobs:
           payload = path.read_text(encoding='utf-8-sig').strip().lstrip('\ufeff').strip()
           path.write_text(payload or '[]\n')
           PY
-          python3 scripts/guard-what-if.py what-if.json
+          python3 scripts/guard-what-if.py
       - name: Upload what-if
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
