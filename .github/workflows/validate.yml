@@ -16,6 +16,8 @@ concurrency:
 jobs:
   application:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -25,14 +27,14 @@ jobs:
         with:
           version: '0.12.19'
           enable-cache: true
-      - run: uv sync --frozen --all-extras
+      - run: uv sync --frozen --all-extras --no-install-project --no-build
       - run: uv lock --check
-      - run: uv run ruff format --check .
-      - run: uv run ruff check .
-      - run: uv run mypy src
-      - run: uv run pytest --cov=cosmos_table_backup --cov-report=term-missing --cov-fail-under=90
-      - run: uv run --frozen --no-sync pip-audit
-      - run: uv run --frozen --no-sync bandit -q -r src
+      - run: uv run --frozen --no-sync --no-build ruff format --check .
+      - run: uv run --frozen --no-sync --no-build ruff check .
+      - run: uv run --frozen --no-sync --no-build mypy src
+      - run: uv run --frozen --no-sync --no-build pytest --cov=cosmos_table_backup --cov-report=term-missing --cov-fail-under=90
+      - run: uv run --frozen --no-sync --no-build pip-audit
+      - run: uv run --frozen --no-sync --no-build bandit -q -r src
 
   infrastructure:
     runs-on: ubuntu-latest
