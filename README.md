@@ -35,14 +35,22 @@ A restore execution does not create or replace this account. It removes unexpect
 
 ```mermaid
 stateDiagram-v2
-    [*] --> BackupDisabled: deploy safely
-    BackupDisabled --> OnDemandBackup: start job manually
+    [*] --> SchedulesDisabled: deploy safely
+    SchedulesDisabled --> OnDemandBackup: start backup manually
     OnDemandBackup --> Committed: manifest.enc written last
-    Committed --> RestoreOnDemand: enable restore access only
+    Committed --> BackupAccepted: pass backup acceptance gate
+    BackupAccepted --> DailyBackupEnabled: enable daily schedule
+    DailyBackupEnabled --> DailyBackupEnabled: each scheduled run commits
+
+    Committed --> RestoreAccessEnabled: enable restore access only
+    DailyBackupEnabled --> RestoreAccessEnabled: enable restore access only
+    RestoreAccessEnabled --> RestoreOnDemand: start validation manually
     RestoreOnDemand --> Evidence: validate counts and hashes
-    Evidence --> MonthlyValidation: enable access and schedule
-    Evidence --> AccessRemoved: close validation window
-    MonthlyValidation --> AccessRemoved: disable and remove RBAC
+    Evidence --> RestoreAccepted: pass restore acceptance gate
+    RestoreAccepted --> MonthlyValidation: enable access and monthly schedule
+    MonthlyValidation --> MonthlyValidation: scheduled validation produces evidence
+    Evidence --> AccessRemoved: close manual validation window
+    MonthlyValidation --> AccessRemoved: disable schedule and remove RBAC
 ```
 
 ## Start here
