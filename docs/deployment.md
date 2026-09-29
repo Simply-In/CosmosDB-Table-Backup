@@ -155,7 +155,7 @@ sequenceDiagram
     O->>G: Bootstrap OIDC and environments
     O->>G: Deploy backup platform (apply=false)
     G->>B: Validate and guarded what-if
-    O->>G: Review artifact; rerun apply=true, all gates off
+    O->>G: Review artifact, then rerun apply=true with all gates off
     G->>B: Create platform with placeholder image
     O->>G: Rerun OIDC bootstrap
     G->>G: Populate ACR variables

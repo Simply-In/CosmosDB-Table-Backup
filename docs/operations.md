@@ -171,7 +171,7 @@ sequenceDiagram
     participant K as Key Vault
     participant T as Persistent serverless test account
     O->>R: Start latest or pinned committed backup
-    R->>B: Require manifest.enc; read bootstrap and manifest
+    R->>B: Require manifest.enc, then read bootstrap and manifest
     R->>K: Unwrap DEK from authenticated versioned key ID
     R->>B: Verify AES-GCM, ETag, byte count, and SHA-256
     R->>T: Remove unexpected tables
