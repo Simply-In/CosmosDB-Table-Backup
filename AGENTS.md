@@ -1,0 +1,5 @@
+# Instructions for coding agents
+
+Before working in this repository, read and follow [CONTRIBUTING.md](CONTRIBUTING.md) and [.github/copilot-instructions.md](.github/copilot-instructions.md). Their contribution rules, architecture/security invariants, validation requirements, and issue/PR ownership workflow apply to all coding agents, not only GitHub Copilot.
+
+When a human asks you to take on an issue, automatically assign that issue and every PR produced by the session to that human, link the actual session branch in GitHub Development, and verify the assignments and links. Resolve ambiguous identity with the user; preserve existing assignees and app-managed branches/worktrees. Use `Closes` in the PR body only for fully completed acceptance criteria; automatic issue closure occurs on merge into the default branch, not on closing an unmerged PR. Follow the detailed workflow and authorization boundaries in the linked instructions, and report blockers rather than claiming incomplete steps succeeded.

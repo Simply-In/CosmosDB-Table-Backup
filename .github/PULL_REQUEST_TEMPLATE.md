@@ -5,7 +5,10 @@
 ## Linked issues
 
 <!-- Use Closes #number only for fully completed work; otherwise Refs #number.
-Use owner/repo#number for another repository. Use None if no issue applies. -->
+Use owner/repo#number for another repository. Use None if no issue applies.
+Automatic issue closure requires merging the closing PR into the default branch;
+closing an unmerged PR does not close the issue. For stacked PRs, put the closing
+reference in the final default-branch integration PR after full completion. -->
 
 ## Scope and non-goals
 
@@ -31,6 +34,7 @@ private/keyless access, bounded resources, and safe telemetry. Use N/A with a re
 ## Review checklist
 
 - [ ] Linked issues are accurate; closing references cover only completed acceptance criteria.
+- [ ] This PR and issues taken on are assigned to the human conducting the work (including agent sessions); the actual session branch is linked in GitHub Development, or blockers are documented.
 - [ ] Relevant tests/checks and unperformed validation are documented above.
 - [ ] Directly related documentation and configuration are updated, or N/A is justified.
 - [ ] No entity data, credentials, keys, or unsafe HTTP logs are included.
