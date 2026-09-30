@@ -34,7 +34,8 @@ private/keyless access, bounded resources, and safe telemetry. Use N/A with a re
 ## Review checklist
 
 - [ ] Linked issues are accurate; closing references cover only completed acceptance criteria.
-- [ ] This PR and issues taken on are assigned to the human conducting the work (including agent sessions); the actual session branch is linked in GitHub Development, or blockers are documented.
+- [ ] This PR is assigned to the human conducting the work (including agent sessions).
+- [ ] For each issue taken on, the issue is assigned to that human and the actual session branch is linked in GitHub Development, or specific blockers are documented; N/A if no issue was taken on.
 - [ ] Relevant tests/checks and unperformed validation are documented above.
 - [ ] Directly related documentation and configuration are updated, or N/A is justified.
 - [ ] No entity data, credentials, keys, or unsafe HTTP logs are included.
