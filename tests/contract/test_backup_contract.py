@@ -1,7 +1,7 @@
 import base64
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import Mock
 
 import pytest
@@ -10,6 +10,7 @@ from cryptography.exceptions import InvalidTag
 from cosmos_table_backup.backup import BackupError, BackupRunner, _object_aad
 from cosmos_table_backup.config import BackupConfig
 from cosmos_table_backup.encryption import canonical_json, decrypt_object
+from cosmos_table_backup.storage import StorageError
 from cosmos_table_backup.telemetry import SafeLogger
 
 
@@ -152,6 +153,39 @@ def test_complete_backup_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     changed_bootstrap_bytes = canonical_json(changed_bootstrap)
     with pytest.raises(InvalidTag):
         decrypt_object(b"d" * 32, encoded_manifest, changed_bootstrap_bytes)
+
+
+@pytest.mark.parametrize("block_size", [16, 32])
+def test_block_overflow_leaves_no_completion_marker(
+    monkeypatch: pytest.MonkeyPatch, block_size: int
+) -> None:
+    monkeypatch.setattr("cosmos_table_backup.storage.MAX_COMMITTED_BLOCKS", 1)
+    tables = Tables()
+    tables.data = {"alpha": []}
+    blobs = Container()
+    raw_logger = Mock()
+    runner = BackupRunner(
+        replace(config(), block_size=block_size),
+        tables,
+        blobs,
+        crypto(),
+        SafeLogger(raw_logger),
+    )
+
+    with pytest.raises(BackupError) as error:
+        runner.run()
+
+    assert isinstance(error.value.__cause__, StorageError)
+    assert "committed-block limit" in str(error.value.__cause__)
+    assert len(blobs.events) == 1
+    assert blobs.events[0][0] == "stage"
+    assert blobs.events[0][1].endswith("tables/00000000.enc")
+    assert not blobs.objects
+    assert not any(name.endswith("manifest.enc") for name in blobs.blobs)
+    assert not any(name.endswith("bootstrap.json") for name in blobs.blobs)
+    events = [call.args[0] for call in raw_logger.info.call_args_list]
+    assert sum('"event":"backup.failed"' in event for event in events) == 1
+    assert all('"event":"backup.completed"' not in event for event in events)
 
 
 def test_any_read_failure_leaves_no_completion_marker() -> None:
