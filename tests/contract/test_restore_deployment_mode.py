@@ -77,6 +77,22 @@ def test_workflow_uses_resolved_mode_for_preview_and_apply() -> None:
     assert 'restoreAccessEnabled="$INPUT_ENABLE_RESTORE"' not in workflow
 
 
+@pytest.mark.parametrize(
+    "suffix", [".vault.azure.net", ".vault.azure.cn", ".vault.usgovcloudapi.net"]
+)
+def test_restore_key_uri_preserves_cloud_suffix(suffix: str) -> None:
+    bicep = (ROOT / "infra/deployment/backup.bicep").read_text()
+    expected = "https://${names.vault}${environment().suffixes.keyvaultDns}/keys/${names.key}"
+    assert f"{{ name: 'KEY_VAULT_KEY_ID', value: '{expected}' }}" in bicep
+    uri = (
+        expected.replace("${names.vault}", "test-vault")
+        .replace("${environment().suffixes.keyvaultDns}", suffix)
+        .replace("${names.key}", "backup-kek")
+    )
+    assert uri == f"https://test-vault{suffix}/keys/backup-kek"
+    assert ".." not in uri
+
+
 def test_restore_grants_are_scoped_and_table_native() -> None:
     bicep = (ROOT / "infra/deployment/backup.bicep").read_text()
     assert "/tableRoleDefinitions/00000000-0000-0000-0000-000000000002" in bicep

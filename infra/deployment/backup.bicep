@@ -676,7 +676,7 @@ module restoreJob 'br/public:avm/res/app/job:0.7.2' = {
           { name: 'AZURE_CLIENT_ID', value: restoreIdentity.outputs.clientId }
           { name: 'BACKUP_STORAGE_ACCOUNT_URL', value: 'https://${names.storage}.blob.${environment().suffixes.storage}' }
           { name: 'BACKUP_CONTAINER', value: names.container }
-          { name: 'KEY_VAULT_KEY_ID', value: 'https://${names.vault}.${environment().suffixes.keyvaultDns}/keys/${names.key}' }
+          { name: 'KEY_VAULT_KEY_ID', value: 'https://${names.vault}${environment().suffixes.keyvaultDns}/keys/${names.key}' }
           { name: 'RESTORE_TARGET_COSMOS_ACCOUNT_RESOURCE_ID', value: restoreAccount.outputs.resourceId }
           { name: 'RESTORE_TARGET_TABLE_ENDPOINT', value: 'https://${names.restoreAccount}.table.cosmos.azure.com' }
           { name: 'RESTORE_SOURCE_ACCOUNT_RESOURCE_ID', value: sourceCosmosAccountResourceId }
