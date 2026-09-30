@@ -613,7 +613,9 @@ module job 'br/public:avm/res/app/job:0.7.2' = {
     scheduleTriggerConfig: scheduleEnabled ? { cronExpression: schedule, parallelism: 1, replicaCompletionCount: 1 } : null
     manualTriggerConfig: scheduleEnabled ? null : { parallelism: 1, replicaCompletionCount: 1 }
     replicaRetryLimit: 1
-    replicaTimeout: 7200
+    // 7200s work + 180s governed console hold + 120s process/flush margin.
+    // This job-level setting also applies to ordinary executions (which do not hold).
+    replicaTimeout: 7500
     workloadProfileName: 'Consumption'
     managedIdentities: { userAssignedResourceIds: [ identity.outputs.resourceId ] }
     registries: [ { server: '${names.registry}.azurecr.io', identity: identity.outputs.resourceId } ]
