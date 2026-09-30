@@ -52,7 +52,7 @@ var restoreAccountId = resourceId('Microsoft.DocumentDB/databaseAccounts', names
 var validatedRestoreAccountName = toLower(sourceCosmosAccountResourceId) == toLower(restoreAccountId) ? fail('The restore-test Cosmos account cannot equal the source Cosmos account.') : names.restoreAccount
 var backupImageParts = split(backupImage, '@sha256:')
 var validatedBackupImage = length(backupImageParts) == 2 && length(last(backupImageParts)) == 64 ? backupImage : fail('backupImage must be pinned with a 64-character @sha256: digest.')
-var restoreContributorRoleDefinitionId = '${restoreAccountId}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
+var restoreContributorRoleDefinitionId = '${restoreAccountId}/tableRoleDefinitions/00000000-0000-0000-0000-000000000002'
 var sourceCosmosAccountName = toLower(last(split(sourceCosmosAccountResourceId, '/')))
 var sourceCosmosTableEndpoint = 'https://${sourceCosmosAccountName}.table.cosmos.azure.com'
 var cosmosZoneId = resourceId('Microsoft.Network/privateDnsZones', 'privatelink.table.cosmos.azure.com')
@@ -497,6 +497,22 @@ module registry 'br/public:avm/res/container-registry/registry:0.13.1' = {
 // The restore target is a dedicated Table API account in the backup security boundary. The validated
 // name fails deployment if the source ID points to this target; global uniqueness is an additional guard.
 // The restore UAMI receives no source-account assignment anywhere here.
+resource restoreTableAccount 'Microsoft.DocumentDB/databaseAccounts@2025-04-15' existing = {
+  #disable-next-line BCP334
+  name: validatedRestoreAccountName
+}
+
+resource restoreTableContributor 'Microsoft.DocumentDB/databaseAccounts/tableRoleAssignments@2026-03-15' = if (restoreAccessEnabled) {
+  parent: restoreTableAccount
+  name: guid(restoreAccountId, resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', names.restoreIdentity), restoreContributorRoleDefinitionId)
+  properties: {
+    principalId: restoreIdentity.outputs.principalId
+    roleDefinitionId: restoreContributorRoleDefinitionId
+    scope: restoreAccountId
+  }
+  dependsOn: [ restoreAccount ]
+}
+
 module restoreAccount 'br/public:avm/res/document-db/database-account:0.21.1' = {
   name: 'restore-test-cosmos-account'
   params: {
@@ -517,14 +533,6 @@ module restoreAccount 'br/public:avm/res/document-db/database-account:0.21.1' = 
       networkAclBypass: 'None'
       publicNetworkAccess: 'Disabled'
     }
-    sqlRoleAssignments: restoreAccessEnabled ? [
-      {
-        name: guid(restoreAccountId, restoreIdentity.outputs.principalId, restoreContributorRoleDefinitionId)
-        principalId: restoreIdentity.outputs.principalId
-        roleDefinitionId: restoreContributorRoleDefinitionId
-        scope: restoreAccountId
-      }
-    ] : []
     privateEndpoints: [
       {
         name: '${names.restoreAccount}-table-pe'

@@ -13,7 +13,7 @@ Both Azure Container Apps Jobs exist after the first infrastructure deployment. 
 | On-demand restore acceptance | either | `true` | `false` | Restore stays manual and receives conditional access |
 | Monthly restore validation | either | `true` | `true` | Restore uses UTC cron (default `0 4 1 * *`) |
 
-The schedules are disabled by default. Manual restore requires `restoreAccessEnabled=true`; `restoreScheduleEnabled` can and should remain false during acceptance. Monthly restore requires both values true. The `deploy-backup.yml` input `enable_restore_validation` sets both together, so it is only for post-acceptance monthly mode—not the initial manual test.
+The schedules are disabled by default. Manual restore requires `restoreAccessEnabled=true`; `restoreScheduleEnabled` can and should remain false during acceptance. Monthly restore requires both values true. Use `deploy-backup.yml` with `enable_restore_access=true` and `enable_restore_validation=false` for manual acceptance. The legacy `enable_restore_validation=true` still enables both access and monthly scheduling, regardless of the access-only input; use it only after acceptance.
 
 Set these shell variables for the examples:
 
@@ -165,27 +165,10 @@ A restore execution never creates the account. It deletes unexpected user tables
 
 ### Run an on-demand restore validation
 
-1. Choose a successfully committed backup. If no UUID is supplied, the restore selects the `manifest.enc` with the newest Blob `last_modified` value. To test a specific committed backup, retain its UUID for step 4.
-2. Enable access **without** enabling the schedule. Because the current workflow couples the flags, perform the same reviewed subscription deployment locally (or through an equivalently protected approved pipeline):
+1. Choose a successfully committed backup. If no UUID is supplied, the restore selects the `manifest.enc` with the newest Blob `last_modified` value. To test a specific committed backup, retain its UUID for step 3.
+2. Enable access **without** enabling the schedule through **Deploy backup platform** on the approved branch: keep the accepted backup schedule setting, set `enable_restore_access=true`, `enable_restore_validation=false`, and first `apply=false`. Review the `backup-what-if-*` artifact, then repeat with identical inputs and `apply=true` through the protected environment. A digest-pinned image is required even for access-only mode.
 
-   ```bash
-   export BACKUP_SCHEDULE_ENABLED='true' # use false if daily backup is not yet accepted
-   export ALLOW_ROLE_ASSIGNMENT_CHANGES=1
-   az deployment sub what-if \
-     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
-     --location "$AZURE_LOCATION" \
-     --template-file infra/main.bicep \
-     --parameters infra/parameters/nonprod.bicepparam \
-     --parameters sourceCosmosAccountResourceId="$SOURCE_COSMOS_ACCOUNT_RESOURCE_ID" \
-                  backupImage="$IMAGE" \
-                  scheduleEnabled="$BACKUP_SCHEDULE_ENABLED" \
-                  restoreAccessEnabled=true \
-                  restoreScheduleEnabled=false \
-     --result-format FullResourcePayloads --output json > what-if.json
-   python3 scripts/guard-what-if.py
-   ```
-
-   Review `what-if.json` under the same change-control standard as the protected environment, then replace `what-if` with `create` (and omit `--result-format FullResourcePayloads`) using identical parameters. This creates the four conditional grants: Blob read, key metadata/unwrap, telemetry publishing, and target Cosmos data contribution.
+   This provisions the four conditional grants: container-scoped Blob read, key-scoped metadata/unwrap, Application Insights telemetry publishing, and **Table-native** data contribution on the isolated target. Read back effective grants before starting; RBAC propagation can delay availability. The target grant uses `tableRoleAssignments` and `tableRoleDefinitions`, not SQL role resources (see [Microsoft's Table RBAC guide](https://learn.microsoft.com/en-us/azure/cosmos-db/table/security/how-to-grant-data-plane-role-based-access)). Existing SQL grants from older incremental deployments are not deleted automatically; review their removal in the approved migration. Changing the grant is not proof that Table SDK delete/recreate metadata operations work: retain the real-service gate documented above and do not weaken verification or grant control-plane permissions to the runtime.
 3. Start the latest committed backup test:
 
    ```bash
@@ -199,13 +182,36 @@ A restore execution never creates the account. It deletes unexpected user tables
 
    ```bash
    export BACKUP_ID='<committed-backup-uuid>'
-   az containerapp job start \
-     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
-     --resource-group "$AZURE_RESOURCE_GROUP" \
-     --name "$RESTORE_JOB_NAME" \
-     --container-name restore-validation \
-     --env-vars RESTORE_BACKUP_ID="$BACKUP_ID"
+   (
+     umask 077
+     template=$(mktemp)
+     trap 'rm -f "$template"' EXIT
+     az containerapp job show \
+       --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+       --resource-group "$AZURE_RESOURCE_GROUP" --name "$RESTORE_JOB_NAME" \
+       --query properties.template --output json > "$template"
+     python3 - "$template" "$BACKUP_ID" <<'PYTHON'
+   import json
+   import sys
+   import uuid
+   from pathlib import Path
+
+   path = Path(sys.argv[1])
+   backup_id = str(uuid.UUID(sys.argv[2]))
+   template = json.loads(path.read_text())
+   container = next(c for c in template["containers"] if c["name"] == "restore-validation")
+   container["env"] = [e for e in container.get("env", []) if e["name"] != "RESTORE_BACKUP_ID"]
+   container["env"].append({"name": "RESTORE_BACKUP_ID", "value": backup_id})
+   path.write_text(json.dumps(template))
+   PYTHON
+     az containerapp job start \
+       --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
+       --resource-group "$AZURE_RESOURCE_GROUP" --name "$RESTORE_JOB_NAME" \
+       --yaml "$template"
+   )
    ```
+
+   Execution overrides replace the complete template. The JSON file above is valid YAML and preserves resources, image and all other environment entries; it is private and removed on exit. Never publish the template or use a partial `--env-vars` override. This does not persist the UUID in job configuration.
 
 4. Monitor the execution list as for backup, substituting `RESTORE_JOB_NAME`. Inspect the container output for the JSON verification report and query `AppTraces` for exactly one matching `restore.completed`. A missing or nonzero execution, `restore.failed`, or absent report is a failed validation.
 

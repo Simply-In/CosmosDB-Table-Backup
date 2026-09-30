@@ -102,14 +102,14 @@ These are identifiers, not credentials, but are intentionally kept out of reposi
 ### `deploy-backup.yml` — Deploy backup platform
 
 - **Trigger:** manual dispatch only.
-- **Inputs:** `image` (optional immutable ACR digest), `enable_schedule` (default `false`), `enable_restore_validation` (default `false`; sets both restore access and monthly schedule), and `apply` (default `false`).
+- **Inputs:** `image` (optional immutable ACR digest), `enable_schedule` (default `false`), `enable_restore_access` (default `false`; grants manual access only), `enable_restore_validation` (default `false`; retains legacy behavior of enabling access and monthly schedule), and `apply` (default `false`).
 - **Gate:** the `backup-infrastructure` environment approval is required before Azure login, validation, or what-if. Runs serialize per repository.
 - **Actions:** validates Bicep, resolves the image, runs subscription-scope what-if, then runs `scripts/guard-what-if.py`. With `apply=true`, it creates the deployment.
 - **Artifacts:** `backup-what-if-<run-id>` (`what-if.json`, `resolved-image.txt`, 30 days) on every attempted run; with apply, `backup-deployment-<run-id>` (`deployment.json`, 30 days).
 - **Deployment outputs inside `deployment.json`:** backup and restore identity IDs, persistent restore-test account ID, both job IDs, versioned backup key URI, source private-endpoint ID, and `sourceIntegrationParameters` containing the three values needed by source integration.
-- **Dependencies:** backup OIDC variables and the parameter file. A nonempty image must be `<ACR_LOGIN_SERVER>/cosmos-table-backup@sha256:<64 lowercase hex>`; a digest is required before either schedule can be enabled.
+- **Dependencies:** backup OIDC variables and the parameter file. A nonempty image must be `<ACR_LOGIN_SERVER>/cosmos-table-backup@sha256:<64 lowercase hex>`; a digest is required before either schedule or manual restore access can be enabled.
 
-The image resolver uses explicit input first, the live backup-job image second, and the disabled placeholder last. Consequently, an infrastructure-only deployment does not roll a released digest backward. The current workflow intentionally couples `restoreAccessEnabled` and `restoreScheduleEnabled`; use the access-only procedure in [Run an on-demand restore validation](operations.md#run-an-on-demand-restore-validation) for the required manual acceptance gate.
+The image resolver uses explicit input first, the live backup-job image second, and the disabled placeholder last. Consequently, an infrastructure-only deployment does not roll a released digest backward. The workflow resolves access as `enable_restore_access OR enable_restore_validation`, and scheduling as `enable_restore_validation`. Both what-if and apply use the same resolved values; invalid boolean inputs fail before Azure login. Use the access-only procedure in [Run an on-demand restore validation](operations.md#run-an-on-demand-restore-validation) for the required manual acceptance gate.
 
 ### `deploy-source-integration.yml` — Deploy source integration
 
@@ -200,7 +200,7 @@ Promotion is digest-only and updates backup and dormant restore together. Rollba
 ## End-to-end workflow procedures
 
 - **Backup E2E:** deploy with gates off → release image → deploy source integration → manually start and accept backup → guarded redeploy with daily schedule enabled. See [Run and accept backup](operations.md#run-an-on-demand-backup).
-- **Restore E2E:** keep monthly scheduling off → enable access only through reviewed Bicep deployment → start isolated restore and inspect its deterministic report → disable and explicitly remove conditional RBAC → only after approval use `enable_restore_validation=true` to establish monthly mode. See [Restore validation](operations.md#run-an-on-demand-restore-validation).
+- **Restore E2E:** keep monthly scheduling off → enable access only through reviewed workflow deployment with `enable_restore_access=true`, `enable_restore_validation=false` → start isolated restore and inspect its deterministic report → disable and explicitly remove conditional RBAC → only after approval use `enable_restore_validation=true` to establish monthly mode. See [Restore validation](operations.md#run-an-on-demand-restore-validation).
 
 The workflow's `enable_restore_validation` is for the post-acceptance monthly state, not the first restore test.
 

@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      enable_restore_access:
+        description: Grant governed manual restore access without enabling monthly scheduling
+        required: true
+        default: false
+        type: boolean
       enable_restore_validation:
         description: Enable monthly restore access and schedule after isolated-target validation
         required: true
@@ -47,6 +52,11 @@ jobs:
     environment: backup-infrastructure
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Resolve restore mode
+        env:
+          INPUT_RESTORE_ACCESS: ${{ inputs.enable_restore_access }}
+          INPUT_ENABLE_RESTORE: ${{ inputs.enable_restore_validation }}
+        run: bash scripts/resolve-restore-mode.sh
       - name: Validate deployment configuration
         run: |
           : "${SUBSCRIPTION_ID:?Set AZURE_BACKUP_SUBSCRIPTION_ID in the backup-infrastructure environment}"
@@ -70,7 +80,6 @@ jobs:
           ALLOW_ROLE_ASSIGNMENT_CHANGES: '1'
           INPUT_IMAGE: ${{ inputs.image }}
           INPUT_ENABLE_SCHEDULE: ${{ inputs.enable_schedule }}
-          INPUT_ENABLE_RESTORE: ${{ inputs.enable_restore_validation }}
         run: |
           set -euo pipefail
           image="$INPUT_IMAGE"
@@ -87,8 +96,8 @@ jobs:
               echo 'Image must be the expected ACR repository pinned by sha256 digest' >&2
               exit 1
             }
-          elif [[ "$INPUT_ENABLE_SCHEDULE" == "true" || "$INPUT_ENABLE_RESTORE" == "true" ]]; then
-            echo 'A digest-pinned image is required before enabling a schedule' >&2
+          elif [[ "$INPUT_ENABLE_SCHEDULE" == "true" || "$RESTORE_ACCESS_ENABLED" == "true" ]]; then
+            echo 'A digest-pinned image is required before enabling a schedule or restore access' >&2
             exit 1
           fi
           printf '%s\n' "$image" > resolved-image.txt
@@ -100,8 +109,8 @@ jobs:
             --parameters infra/parameters/nonprod.bicepparam \
             --parameters "${image_args[@]}" sourceCosmosAccountResourceId="$SOURCE_ACCOUNT_ID" \
               scheduleEnabled="$INPUT_ENABLE_SCHEDULE" \
-              restoreScheduleEnabled="$INPUT_ENABLE_RESTORE" \
-              restoreAccessEnabled="$INPUT_ENABLE_RESTORE" \
+              restoreScheduleEnabled="$RESTORE_SCHEDULE_ENABLED" \
+              restoreAccessEnabled="$RESTORE_ACCESS_ENABLED" \
             --result-format FullResourcePayloads --no-pretty-print --only-show-errors --output json > what-if.json
           # Azure CLI can emit whitespace before a UTF-8 BOM for an empty What-if response.
           python3 - <<'PY'
@@ -125,7 +134,6 @@ jobs:
         if: inputs.apply
         env:
           INPUT_ENABLE_SCHEDULE: ${{ inputs.enable_schedule }}
-          INPUT_ENABLE_RESTORE: ${{ inputs.enable_restore_validation }}
         run: |
           set -euo pipefail
           name="backup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -137,8 +145,8 @@ jobs:
             --parameters infra/parameters/nonprod.bicepparam \
             --parameters "${image_args[@]}" sourceCosmosAccountResourceId="$SOURCE_ACCOUNT_ID" \
               scheduleEnabled="$INPUT_ENABLE_SCHEDULE" \
-              restoreScheduleEnabled="$INPUT_ENABLE_RESTORE" \
-              restoreAccessEnabled="$INPUT_ENABLE_RESTORE" \
+              restoreScheduleEnabled="$RESTORE_SCHEDULE_ENABLED" \
+              restoreAccessEnabled="$RESTORE_ACCESS_ENABLED" \
             --output json > deployment.json
       - name: Upload deployment outputs
         if: inputs.apply
