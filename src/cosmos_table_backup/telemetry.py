@@ -9,18 +9,23 @@ from typing import Any, Final
 
 from azure.monitor.opentelemetry import configure_azure_monitor
 
-_ALLOWED_FIELDS: Final = frozenset(
-    {
-        "event",
-        "backup_id",
-        "table_index",
-        "table_count",
-        "entity_count",
-        "byte_count",
-        "duration_ms",
-        "status",
-        "error_type",
-    }
+from cosmos_table_backup.metrics import METRIC_FIELDS
+
+_ALLOWED_FIELDS: Final = (
+    frozenset(
+        {
+            "event",
+            "backup_id",
+            "table_index",
+            "table_count",
+            "entity_count",
+            "byte_count",
+            "duration_ms",
+            "status",
+            "error_type",
+        }
+    )
+    | METRIC_FIELDS
 )
 
 

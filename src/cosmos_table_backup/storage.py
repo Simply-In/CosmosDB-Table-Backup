@@ -7,6 +7,8 @@ from typing import Any
 
 from azure.storage.blob import BlobBlock
 
+from cosmos_table_backup.metrics import StageMetrics
+
 MAX_COMMITTED_BLOCKS = 50_000
 
 
@@ -17,7 +19,10 @@ class StorageError(RuntimeError):
 class BlockBlobWriter:
     """Buffer at most one configured block and atomically commit a new blob."""
 
-    def __init__(self, blob_client: Any, block_size: int) -> None:
+    def __init__(
+        self, blob_client: Any, block_size: int, metrics: StageMetrics | None = None
+    ) -> None:
+        self._metrics = metrics or StageMetrics(enabled=False)
         self._client = blob_client
         self._block_size = block_size
         self._buffer = bytearray()
@@ -47,7 +52,10 @@ class BlockBlobWriter:
             raise StorageError("blob exceeds the 50,000 committed-block limit")
         block_id = base64.b64encode(f"{self._index:08d}".encode()).decode("ascii")
         payload = bytes(self._buffer)
-        self._client.stage_block(block_id=block_id, data=payload, length=len(payload))
+        with self._metrics.time("stage_block_ms", "stage_block_max_ms"):
+            self._client.stage_block(block_id=block_id, data=payload, length=len(payload))
+        self._metrics.add("stage_block_count", 1)
+        self._metrics.add("stage_block_bytes", len(payload))
         self._blocks.append(BlobBlock(block_id=block_id))
         self._index += 1
         self._buffer.clear()
@@ -59,11 +67,12 @@ class BlockBlobWriter:
         try:
             from azure.storage.blob import ContentSettings
 
-            self._client.commit_block_list(
-                self._blocks,
-                content_settings=ContentSettings(content_type=content_type),
-                if_none_match="*",
-            )
+            with self._metrics.time("blob_commit_ms"):
+                self._client.commit_block_list(
+                    self._blocks,
+                    content_settings=ContentSettings(content_type=content_type),
+                    if_none_match="*",
+                )
         except Exception as exc:
             raise StorageError("create-only blob commit failed") from exc
         self._closed = True

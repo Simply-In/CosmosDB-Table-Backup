@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from typing import Any, Protocol
 
+from cosmos_table_backup.metrics import StageMetrics
+
 EXCLUDED_TABLES = frozenset({"cards"})
 
 
@@ -36,10 +38,21 @@ def discover_tables(
 
 
 def iter_entities(
-    service: TablePager, table_name: str, page_size: int
+    service: TablePager, table_name: str, page_size: int, metrics: StageMetrics | None = None
 ) -> Iterator[Mapping[str, Any]]:
     """Open the already-approved table and yield one SDK page at a time."""
     table = service.get_table_client(table_name)
     pages = table.query_entities(query_filter="", results_per_page=page_size).by_page()
-    for page in pages:
+    if metrics is None:
+        for page in pages:
+            yield from page
+        return
+    pages = iter(pages)
+    while True:
+        try:
+            with metrics.time("page_fetch_ms", "page_fetch_max_ms"):
+                page = next(pages)
+        except StopIteration:
+            return
+        metrics.add("page_count", 1)
         yield from page
