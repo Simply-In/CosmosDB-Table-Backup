@@ -7,6 +7,8 @@ from typing import Any
 
 from azure.storage.blob import BlobBlock
 
+MAX_COMMITTED_BLOCKS = 50_000
+
 
 class StorageError(RuntimeError):
     """Raised when a blob cannot be safely committed."""
@@ -41,6 +43,8 @@ class BlockBlobWriter:
     def _stage(self) -> None:
         if not self._buffer:
             return
+        if len(self._blocks) >= MAX_COMMITTED_BLOCKS:
+            raise StorageError("blob exceeds the 50,000 committed-block limit")
         block_id = base64.b64encode(f"{self._index:08d}".encode()).decode("ascii")
         payload = bytes(self._buffer)
         self._client.stage_block(block_id=block_id, data=payload, length=len(payload))

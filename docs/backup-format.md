@@ -6,6 +6,12 @@
 
 A run uses a UUID backup ID and writes objects under `backups/<backup-id>/`. The only completion marker is a successfully committed `manifest.enc`; consumers must ignore a prefix without it. Every commit is create-only (`If-None-Match: *`). Table objects are numbered so table names are not exposed in object paths.
 
+## Object capacity
+
+Azure block blobs permit at most [50,000 committed blocks](https://learn.microsoft.com/en-us/rest/api/storageservices/put-block). Each backup object is limited to `BACKUP_BLOCK_SIZE × 50,000` bytes; a final partial block also consumes one block slot. With the default 4 MiB block size, the maximum encrypted payload is 195.3125 GiB.
+
+The limit includes the 33-byte AES-GCM framing below, so serialized table plaintext must leave at least 33 bytes of headroom. The writer rejects an overflowing full block during writing, or an overflowing final partial block during commit, before uploading that block. Overflow fails the backup without a completion marker; objects are not implicitly split and block sizes are not automatically increased.
+
 ## Cryptography
 
 Each run generates one random 256-bit data-encryption key (DEK). The exact versioned Key Vault key wraps it once with RSA-OAEP-256. Each independently encrypted object uses a fresh random 96-bit nonce, tracked for uniqueness during the run. AES-256-GCM object bytes are:
