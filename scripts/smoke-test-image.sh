@@ -20,7 +20,7 @@ check_startup() {
   local result=0
   docker run --rm --network none --platform linux/amd64 "$IMAGE" "$@" > "$output" 2>&1 || result=$?
   if [[ "$result" -ne 2 ]] || ! grep -q 'configuration error:' "$output" || \
-      ! grep -Eq "\"event\":[[:space:]]*\"$event\"" "$output"; then
+      ! grep -Fq "\"event\":\"$event\"" "$output"; then
     echo "Image startup failed for $event; expected a fail-closed configuration error (exit 2)." >&2
     exit 1
   fi
