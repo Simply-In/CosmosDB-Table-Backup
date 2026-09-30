@@ -125,9 +125,96 @@ Use page time as a source-read indicator, staging/commit time as a Blob-write in
 
 ### Measure performance in nonproduction
 
-Use only explicitly approved synthetic sources and isolated restore targets, with private networking and separate keyless identities. Record the commit/image, pinned SDK versions, workload, page/block settings, capacity, CPU/memory limits, backup ID and UTC window. Compare repeated identical runs without changing encryption, exclusions or verification. Verify manifest completion and isolated restore integrity; retain only safe aggregate measurements.
+This procedure uses the existing jobs and pinned SDK, not a benchmark harness. **Commands below are for a separately approved experiment, not authorization to execute Azure operations.** Provisioning, identity grants, job configuration and cleanup need operator approval. The historical resources below were removed; their endpoints/jobs cannot be reused.
 
-Correlate stage summaries with the actual Table account's Azure Monitor request/status, latency and capacity metrics at their supported grain. Record dimensions, aggregation, missing buckets and other traffic. Correlation is temporal, not a backup-ID/request join. Logical page counts are not physical retry counts; SQL-oriented `TotalRequestUnits` documentation does not establish Table request charges. Incomplete metrics or missing controlled 429 evidence must remain explicit limitations.
+1. Prepare a dedicated, empty **nonproduction Cosmos DB for Table source**, a different disposable restore account, and manual backup/restore jobs following [deployment prerequisites](deployment.md#prerequisites) and the runbooks above. Confirm both jobs use the approved immutable image, source/target IDs differ, private DNS works, public/local-key access stays disabled, and schedules are off. Use separate seed (synthetic source write), backup (source read only) and restore identities. Run the seed snippet on an approved private managed-identity host with Python 3.14 and the frozen dependencies from [CONTRIBUTING](../CONTRIBUTING.md#development-and-validation); do not use a production job or identity. Record approved resource IDs privately, the commit/image, SDK versions, source capacity, page/block sizes and job CPU/memory/time limits. Enforce approved seed-host wall-time and job scratch limits before starting; stop if the budget is exhausted. Keep all evidence outside Git.
+
+2. Initialize two empty synthetic tables through the operator's approved ARM identity. Set the source variables explicitly; neither command belongs on a production account. [Azure CLI Table commands](https://learn.microsoft.com/en-us/cli/azure/cosmosdb/table) support this initialization without account keys:
+
+   ```bash
+   export SYNTHETIC_SUBSCRIPTION_ID='<approved-test-subscription>'
+   export SYNTHETIC_RESOURCE_GROUP='<dedicated-source-rg>'
+   export SYNTHETIC_ACCOUNT='<dedicated-source-account>'
+   export SOURCE_COSMOS_ACCOUNT_RESOURCE_ID="/subscriptions/$SYNTHETIC_SUBSCRIPTION_ID/resourceGroups/$SYNTHETIC_RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$SYNTHETIC_ACCOUNT"
+   az cosmosdb table create --subscription "$SYNTHETIC_SUBSCRIPTION_ID" \
+     --resource-group "$SYNTHETIC_RESOURCE_GROUP" --account-name "$SYNTHETIC_ACCOUNT" --name synthetic --output none
+   az cosmosdb table create --subscription "$SYNTHETIC_SUBSCRIPTION_ID" \
+     --resource-group "$SYNTHETIC_RESOURCE_GROUP" --account-name "$SYNTHETIC_ACCOUNT" --name cards --output none
+   ```
+
+   Choose provisioned capacity under the approval if applicable; do not pass provisioned throughput to a serverless account. Table-native RBAC feasibility is a real-service gate, not guaranteed by the role name. Empty-account enumeration previously returned 403 until ARM initialization; stop on any authorization failure rather than adding SQL grants or relaxing networking.
+
+3. On the seed host, set `SYNTHETIC_ACCOUNT` to that same approved account and `SEED_CLIENT_ID` to the seed managed identity. Populate 70,000 entities evenly across 16 partitions (4,375 each), with one fixed 256-byte ASCII payload, plus one excluded `cards` canary. This bounded sequential snippet keeps one entity in flight, requires empty tables, never prints keys/values and fails rather than upserting existing data. The [Table SDK](https://learn.microsoft.com/en-us/python/api/azure-data-tables/azure.data.tables.tableclient) supports `create_entity` and paged `list_entities`; the [service client](https://learn.microsoft.com/en-us/python/api/azure-data-tables/azure.data.tables.tableserviceclient) supports the explicit Cosmos audience.
+
+   ```bash
+   uv run --frozen --no-sync --no-build python - <<'PY'
+   import os
+   from azure.data.tables import TableServiceClient
+   from azure.identity import ManagedIdentityCredential
+
+   endpoint = f"https://{os.environ['SYNTHETIC_ACCOUNT']}.table.cosmos.azure.com"
+   with ManagedIdentityCredential(client_id=os.environ["SEED_CLIENT_ID"]) as credential:
+       with TableServiceClient(endpoint, credential=credential,
+                               audience="https://cosmos.azure.com") as service:
+           if {t.name for t in service.list_tables()} != {"synthetic", "cards"}:
+               raise RuntimeError("Expected only the two dedicated synthetic tables")
+           data = service.get_table_client("synthetic")
+           canary = service.get_table_client("cards")
+           for table in (data, canary):
+               if next(iter(table.list_entities(results_per_page=1)), None) is not None:
+                   raise RuntimeError("Synthetic tables must be empty")
+           for i in range(70_000):
+               data.create_entity({"PartitionKey": f"p{i % 16:02d}",
+                                   "RowKey": f"r{i:08d}", "payload": "x" * 256})
+           canary.create_entity({"PartitionKey": "synthetic", "RowKey": "canary"})
+           if (sum(1 for _ in data.list_entities(results_per_page=500)) != 70_000
+                   or sum(1 for _ in canary.list_entities(results_per_page=500)) != 1):
+               raise RuntimeError("Synthetic entity counts did not match")
+   print("Synthetic counts verified: 70000 included, 1 excluded")
+   PY
+   ```
+
+   On failure, treat the workload as partial; clean/reinitialize under approval before retrying. Do not seed during measurement. Configure the dedicated backup job to this source with `synthetic` included, preserving configured exclusions and mandatory `cards`; use `BACKUP_PAGE_SIZE=500`, `BACKUP_BLOCK_SIZE=4194304` for the reference workload. The 256 bytes describe only the payload, not encoded entity size.
+
+4. Run three sequential backups via [Run an on-demand backup](#run-an-on-demand-backup), recording UTC start/end and execution name for each. Wait for terminal execution state and telemetry ingestion before the next run; no concurrent traffic or setting changes. In Log Analytics **Logs**, substitute the UTC window and run UUID in this KQL to collect allowlisted stage summaries (not raw container/SDK logs):
+
+   ```kusto
+   AppTraces
+   | where TimeGenerated between (datetime(<UTC-start>) .. datetime(<UTC-end>))
+   | extend m = parse_json(Message)
+   | where tostring(m.backup_id) == "<backup-uuid>"
+   | where tostring(m.event) in ("table_completed", "backup.completed", "backup.failed")
+   | project TimeGenerated, event=tostring(m.event), backup_id=tostring(m.backup_id),
+       table_index=toint(m.table_index), table_count=toint(m.table_count),
+       entities=tolong(m.entity_count), elapsed_ms=todouble(m.duration_ms),
+       entities_per_second=todouble(m.entities_per_second),
+       plaintext_bytes_per_second=todouble(m.plaintext_bytes_per_second),
+       encrypted_bytes_per_second=todouble(m.encrypted_bytes_per_second),
+       pages=tolong(m.page_count), page_ms=todouble(m.page_fetch_ms),
+       blocks=tolong(m.stage_block_count), stage_ms=todouble(m.stage_block_ms),
+       commit_ms=todouble(m.blob_commit_ms), local_ms=todouble(m.local_processing_ms),
+       spill_bytes=tolong(m.digest_spill_bytes), spill_ms=todouble(m.digest_spill_ms),
+       merge_ms=todouble(m.digest_merge_ms), scratch_bound=tolong(m.digest_scratch_peak_bytes_bound)
+   ```
+
+   Require one `backup.completed`, one included table and 70,000 entities; missing completion is failure, not a usable baseline. Compare per-table `page_ms`, `stage_ms + commit_ms` and `local_ms` against `elapsed_ms`, then medians/ranges across runs; do not double-count digest timers. Record CPU/memory observations from the job's Azure Monitor metrics if available at the execution grain; label missing CPU/RSS/disk measurements unavailable. The scratch field is a bound, not an observed peak. No instrumentation-disable switch remains, so this procedure does not reproduce the historical overhead comparison.
+
+5. Query the **actual synthetic Table account's** metric definitions, then values over each recorded window. [Metric definitions](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-documentdb-databaseaccounts-metrics) describe resource-wide availability; live Table applicability and populated buckets still need verification. [CLI metric queries](https://learn.microsoft.com/en-us/cli/azure/monitor/metrics) use the supported name, aggregation, dimensions and grain:
+
+   ```bash
+   az monitor metrics list-definitions --resource "$SOURCE_COSMOS_ACCOUNT_RESOURCE_ID" --output json
+   export START_UTC='<UTC-start-in-ISO-8601>' END_UTC='<UTC-end-in-ISO-8601>'
+   export METRIC='NormalizedRUConsumption' AGGREGATION='Maximum' GRAIN='PT1M'
+   az monitor metrics list --resource "$SOURCE_COSMOS_ACCOUNT_RESOURCE_ID" \
+     --metrics "$METRIC" --aggregation "$AGGREGATION" --interval "$GRAIN" \
+     --start-time "$START_UTC" --end-time "$END_UTC" --output json
+   ```
+
+   Repeat with `ThrottledRequestPercentage`/`Average`, `TotalRequests`/`Count`, and `ServerSideLatencyGateway`/`Average` only where supported. Split request series with `--dimension StatusCode OperationType` only if those dimensions exist, checking actual returned Table operation/status values rather than assuming GET/200. Preserve units, filters, dimensions and missing buckets; requery after ingestion delay. Correlation is temporal, not a backup-ID/request join; exclude seeding/restore windows and disclose other traffic. Logical pages are not physical attempts. `TotalRequestUnits` is documented as SQL RU consumption, not evidence of Table per-request charges. Missing buckets are not zeros, and observing zero throttling is not an induced-429 test.
+
+6. Pin each committed UUID with the existing [on-demand isolated restore command](#run-an-on-demand-restore-validation), using already approved restore-only access and keeping its schedule off. Require a successful deterministic report and matching `restore.completed`, exact table set (`synthetic`, no `cards`), 70,000 entities, and manifest/target key and content hashes as described in [What a successful restore proves](#what-a-successful-restore-proves). A 403 on enumeration or delete/recreate leaves integrity **unverified**; stop and record the sanitized error type/stage, not success. The historical delete 403 remains unresolved even with Table-native contributor access; no permission workaround or bypass is part of this procedure.
+
+7. After executions stop and safe aggregate evidence is retained, use [restored-data/access cleanup](#clean-up-restored-data-and-close-access) and [teardown](#teardown) under separate operator approval. For approved ARM cleanup of these test tables, run `az cosmosdb table delete` with the same explicit subscription/resource-group/account arguments from step 2, `--name synthetic --yes`, then `--name cards --yes`; on the **different restore account**, delete only its synthetic table. Verify each account with `az cosmosdb table list` and the same explicit account arguments. Remove only dedicated test resources/grants/endpoints/DNS/deployment records, preserving shared infrastructure. Retain encrypted blobs until approved lifecycle/WORM eligibility; verify physical deletion from an authorized private host later, or record it unverified. Never grant Blob delete to the backup identity, weaken network rules or bypass retention to clean up.
 
 ### Historical synthetic baseline (2026-09-30)
 
