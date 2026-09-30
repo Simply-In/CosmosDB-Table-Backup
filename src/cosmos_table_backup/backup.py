@@ -184,11 +184,12 @@ class BackupRunner:
             )
             return backup_id
         except Exception as exc:
+            elapsed_seconds = perf_counter() - run_clock
             self._log.emit(
                 "backup.failed",
                 backup_id=backup_id,
                 status="failed",
                 error_type=type(exc).__name__,
-                duration_ms=(perf_counter() - run_clock) * 1000,
+                duration_ms=elapsed_seconds * 1000,
             )
             raise BackupError("backup failed; no valid completion marker was created") from exc

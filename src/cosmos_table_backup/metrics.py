@@ -60,7 +60,7 @@ class StageMetrics:
 
     def include(self, other: StageMetrics) -> None:
         for field, value in other.values.items():
-            if field.endswith("_max_ms") or field.endswith("_bound"):
+            if field.endswith(("_max_ms", "_bound")):
                 self.maximum(field, value)
             else:
                 self.add(field, value)

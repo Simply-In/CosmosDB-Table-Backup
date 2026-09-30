@@ -85,8 +85,9 @@ def test_storage_success_counters_and_failed_stage_latency(monkeypatch: pytest.M
     client.commit_block_list.assert_called_once()
     assert client.commit_block_list.call_args.kwargs["if_none_match"] == "*"
     client.stage_block.side_effect = RuntimeError("secret")
+    failing_writer = BlockBlobWriter(client, 4, metrics)
     with pytest.raises(RuntimeError):
-        BlockBlobWriter(client, 4, metrics).write(b"1234")
+        failing_writer.write(b"1234")
     assert metrics.values["stage_block_count"] == 2
     assert metrics.values["stage_block_ms"] == 3000
 

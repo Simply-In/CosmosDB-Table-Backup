@@ -19,7 +19,8 @@ from cosmos_table_backup.telemetry import SafeLogger
 def benchmark_module() -> ModuleType:
     path = Path(__file__).parents[2] / "scripts" / "benchmark-backup.py"
     spec = importlib.util.spec_from_file_location("offline_backup_benchmark", path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -79,8 +80,10 @@ def test_tiny_real_backup_counts_and_cleanup(benchmark_module: ModuleType) -> No
     ],
 )
 def test_bounded_settings(benchmark_module: ModuleType, field: str, value: object) -> None:
+    settings = tiny_settings(benchmark_module)
+    changes = {field: value}
     with pytest.raises(ValueError, match=field):
-        replace(tiny_settings(benchmark_module), **{field: value})
+        replace(settings, **changes)
 
 
 def test_cli_settings(benchmark_module: ModuleType) -> None:
@@ -119,8 +122,9 @@ def test_source_generates_only_requested_sdk_page(benchmark_module: ModuleType) 
     assert len({entity["PartitionKey"] for entity in entities}) == 3
     duplicate = benchmark_module.SyntheticTable(tiny_settings(benchmark_module))
     assert list(duplicate.query_entities(query_filter="", results_per_page=2)) == entities
+    source = benchmark_module.SyntheticSource(tiny_settings(benchmark_module))
     with pytest.raises(ValueError):
-        benchmark_module.SyntheticSource(tiny_settings(benchmark_module)).get_table_client("cards")
+        source.get_table_client("cards")
 
 
 def test_non_retaining_sink_and_create_only_commit(benchmark_module: ModuleType) -> None:
@@ -175,8 +179,9 @@ def test_failure_cleans_owned_scratch_after_digest_spill(
 
     monkeypatch.setattr(benchmark_module.SyntheticTable, "_entity", failing_entity)
     monkeypatch.setattr("cosmos_table_backup.backup.OrderIndependentDigest", small_digest)
+    settings = tiny_settings(benchmark_module)
     with pytest.raises(BackupError):
-        benchmark_module.run_once(tiny_settings(benchmark_module), instrumentation_enabled=True)
+        benchmark_module.run_once(settings, instrumentation_enabled=True)
     assert len(observed_scratch) == 2
     assert all(not path.exists() for path in observed_scratch)
     assert set(Path.cwd().iterdir()) == before
