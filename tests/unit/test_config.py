@@ -39,7 +39,7 @@ def test_invalid_configuration_fails_closed(name: str, value: str) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["not-json", "{}", '["cards", "cards"]', '[""]', "[1]"],
+    ["not-json", "{}", '[["cards"]', '["cards", "cards"]', '[""]', "[1]"],
 )
 def test_invalid_excluded_tables_fail_closed(value: str) -> None:
     with pytest.raises(ConfigurationError, match="EXCLUDED_TABLES_JSON"):
