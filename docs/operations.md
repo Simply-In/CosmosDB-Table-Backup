@@ -163,79 +163,24 @@ The dedicated restore account is provisioned **unconditionally** with the platfo
 
 A restore execution never creates the account. It deletes unexpected user tables, then deletes and recreates each manifest table. After success, restored data remains in the persistent test account until an operator cleans it up, runs another validation that recreates it, or tears down the account. It is not a production restore destination.
 
-### Run an on-demand restore validation
+### Run a governed on-demand backup and restore validation
 
-1. Choose a successfully committed backup. If no UUID is supplied, the restore selects the `manifest.enc` with the newest Blob `last_modified` value. To test a specific committed backup, retain its UUID for step 3.
-2. Enable access **without** enabling the schedule through **Deploy backup platform** on the approved branch: keep the accepted backup schedule setting, set `enable_restore_access=true`, `enable_restore_validation=false`, and first `apply=false`. Review the `backup-what-if-*` artifact, then repeat with identical inputs and `apply=true` through the protected environment. A digest-pinned image is required even for access-only mode.
+Use **On-demand backup and isolated restore** (`run-on-demand.yml`) on `main` through the protected `backup-infrastructure` environment. Keep both jobs Manual and restore access enabled. Set environment variable `RESTORE_JOB_NAME` to the existing isolated restore job, alongside the existing deployment identity, subscription, resource group, source account, backup job, and registry settings.
 
-   This provisions the four conditional grants: container-scoped Blob read, key-scoped metadata/unwrap, Application Insights telemetry publishing, and **Table-native** data contribution on the isolated target. Read back effective grants before starting; RBAC propagation can delay availability. The target grant uses `tableRoleAssignments` and `tableRoleDefinitions`, not SQL role resources (see [Microsoft's Table RBAC guide](https://learn.microsoft.com/en-us/azure/cosmos-db/table/security/how-to-grant-data-plane-role-based-access)). Existing SQL grants from older incremental deployments are not deleted automatically; review their removal in the approved migration. Changing the grant is not proof that Table SDK delete/recreate metadata operations work: retain the real-service gate documented above and do not weaken verification or grant control-plane permissions to the runtime.
-   The isolated target keeps `disableLocalAuthentication=true` and private-only networking, but sets `disableKeyBasedMetadataWriteAccess=false`. Microsoft's [account property reference](https://learn.microsoft.com/en-us/azure/templates/microsoft.documentdb/2025-04-15/databaseaccounts) describes this second flag as blocking metadata writes through account keys, not as an Entra permission. It does not enable key authentication while local authentication stays disabled. A keyless read-only diagnostic on the empty target returned HTTP 403 naming `sqlDatabases/write` despite the Table-native contributor grant. Testing this target-only flag change is a service-feasibility hypothesis, not proof of a fix: a reviewed deployment must demonstrate enumeration, delete/recreate and complete count/key/content/table-set verification. Do not broaden runtime permissions or manually initialize tables if it still fails.
-   Confirm `KEY_VAULT_KEY_ID` is the unversioned URI of the allowed key, with exactly one dot between the vault name and cloud suffix. Bicep's `environment().suffixes.keyvaultDns` already includes its leading dot. A mismatched URI causes bootstrap rejection before key unwrap; correct the IaC and redeploy, never relax exact-key validation.
-3. Start the latest committed backup test:
+Leave `backup_id` empty for a fresh backup followed by restore, or supply a committed UUID for restore-only testing. The workflow:
 
-   ```bash
-   az containerapp job start \
-     --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
-     --resource-group "$AZURE_RESOURCE_GROUP" \
-     --name "$RESTORE_JOB_NAME"
-   ```
+1. Validates matching immutable images, protected `cards` exclusion, source/target/store bindings, private networking and disabled local authentication.
+2. Runs backup when requested, requiring both successful execution and its matching completion event.
+3. Runs `restore-test --plan` inside the private managed-identity job. It authenticates bootstrap, manifest and every encrypted table object before emitting a bounded private framed plan. No target client is opened.
+4. Rechecks idle jobs and unchanged configuration, then uses the protected operator identity to delete/recreate only the isolated target tables through ARM. Exact prepared table-set equality is mandatory.
+5. Passes the exact authenticated plan as private `RESTORE_PREPARATION_JSON` with a pinned UUID to `restore-test --data-only`. Runtime checks every expected table empty before any insert, performs create-only inserts and fully rereads counts, key and content hashes. It never calls data-plane table list/create/delete.
+6. Requires successful runtime execution and `restore.data_verified` with status `data_verified_pending_table_set`, then independently validates the final ARM table set and unchanged target configuration. Only this combined proof produces a passed `smoke-result.json` artifact.
 
-   Or pin a committed UUID for this execution:
+The plan, execution template, detailed runtime report and console remain private; only UUID, immutable image, execution identifiers, counts, stages and status are published. Failed gates produce sanitized failure evidence, not successful acceptance. The workflow is bounded to 355 minutes; backup/plan/data deadlines are 7500/3600/7200 seconds. Cancellation attempts to stop only the currently owned execution. Hard runner termination can prevent cleanup; check the execution state before rerunning.
 
-   ```bash
-   export BACKUP_ID='<committed-backup-uuid>'
-   (
-     umask 077
-     template=$(mktemp)
-     trap 'rm -f "$template"' EXIT
-     az containerapp job show \
-       --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
-       --resource-group "$AZURE_RESOURCE_GROUP" --name "$RESTORE_JOB_NAME" \
-       --query properties.template --output json > "$template"
-     python3 - "$template" "$BACKUP_ID" <<'PYTHON'
-   import json
-   import sys
-   import uuid
-   from pathlib import Path
+Deployment, release, image promotion and on-demand workflows share `backup-operations` concurrency. Operators and external automation must honor exclusive ownership of the target: GitHub concurrency does not lock independent Azure operations. Never run a manual reset or direct restore concurrently. The preparation assertion is trusted supervisor input, not a signed receipt or freshness proof.
 
-   path = Path(sys.argv[1])
-   backup_id = str(uuid.UUID(sys.argv[2]))
-   template = json.loads(path.read_text())
-   container = next(c for c in template["containers"] if c["name"] == "restore-validation")
-   container["env"] = [e for e in container.get("env", []) if e["name"] != "RESTORE_BACKUP_ID"]
-   container["env"].append({"name": "RESTORE_BACKUP_ID", "value": backup_id})
-   path.write_text(json.dumps(template))
-   PYTHON
-     az containerapp job start \
-       --subscription "$AZURE_BACKUP_SUBSCRIPTION_ID" \
-       --resource-group "$AZURE_RESOURCE_GROUP" --name "$RESTORE_JOB_NAME" \
-       --yaml "$template"
-   )
-   ```
-
-   Execution overrides replace the complete template. The JSON file above is valid YAML and preserves resources, image and all other environment entries; it is private and removed on exit. Never publish the template or use a partial `--env-vars` override. This does not persist the UUID in job configuration.
-
-4. Monitor the execution list as for backup, substituting `RESTORE_JOB_NAME`. Inspect the container output for the JSON verification report and query `AppTraces` for exactly one matching `restore.completed`. A missing or nonzero execution, `restore.failed`, or absent report is a failed validation.
-
-```mermaid
-sequenceDiagram
-    actor O as Operator
-    participant R as Restore Job
-    participant B as Immutable backups
-    participant K as Key Vault
-    participant T as Persistent serverless test account
-    O->>R: Start latest or pinned committed backup
-    R->>B: Require manifest.enc, then read bootstrap and manifest
-    R->>K: Unwrap DEK from authenticated versioned key ID
-    R->>B: Verify AES-GCM, ETag, byte count, and SHA-256
-    R->>T: Remove unexpected tables
-    loop Each manifest table
-        R->>T: Delete and recreate table
-        R->>T: Restore typed entities
-        R->>T: Re-read count and key/content hashes
-    end
-    R-->>O: JSON evidence and restore.completed
-```
+The legacy direct `restore-test` path still performs runtime data-plane metadata lifecycle and emits `restore.completed` only after its own exact-set verification. The observed service denies that lifecycle on this target. Do not use direct execution or enable the monthly runtime schedule as a substitute for governed acceptance; the new workflow does not repair or schedule the legacy monthly path.
 
 ### What a successful restore proves
 
@@ -245,8 +190,8 @@ Success requires exact table-set equality and, for every table, equality of mani
 
 ### Accept restore before enabling monthly validation
 
-1. Complete a manual test with `restoreAccessEnabled=true` and `restoreScheduleEnabled=false`.
-2. Confirm isolated source/target IDs, private DNS, keyless access, selected backup UUID, exact table set, counts/hashes, JSON report, and `restore.completed`.
+1. Complete the governed on-demand workflow with `restoreAccessEnabled=true` and `restoreScheduleEnabled=false`.
+2. Confirm isolated source/target IDs, private DNS, keyless access, selected backup UUID, runtime counts/hashes and the workflow’s independent exact ARM table-set verification. `restore.data_verified` alone is not acceptance. The legacy monthly runtime path remains gated on a separate successful lifecycle feasibility test; governed on-demand success does not authorize enabling it.
 3. Exercise a controlled failed validation and confirm `restore.failed` alerting.
 4. Review data retention and operator cleanup evidence.
 5. Close the temporary access window and verify the four conditional grants are gone as described below.

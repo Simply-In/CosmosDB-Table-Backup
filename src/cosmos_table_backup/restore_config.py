@@ -106,6 +106,16 @@ class RestoreConfig:
     download_chunk_size: int = 4 * 1024 * 1024
     max_batch_payload_bytes: int = 1_250_000
     log_level: str = "INFO"
+    data_only: bool = False
+    preparation_json: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.data_only and self.backup_id is None:
+            raise ConfigurationError("RESTORE_DATA_ONLY requires an explicit RESTORE_BACKUP_ID")
+        if self.preparation_json is not None and len(self.preparation_json.encode("utf-8")) > min(
+            16 * 1024, self.max_manifest_bytes
+        ):
+            raise ConfigurationError("RESTORE_PREPARATION_JSON exceeds the manifest byte bound")
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> RestoreConfig:
@@ -127,6 +137,9 @@ class RestoreConfig:
         )
         _validate_isolated_target(values, source_resource_id, target_resource_id, target, storage)
         backup_id = _backup_id(values)
+        mode = values.get("RESTORE_DATA_ONLY", "false").strip().lower()
+        if mode not in {"true", "false"}:
+            raise ConfigurationError("RESTORE_DATA_ONLY must be true or false")
         client_id = _required(values, "AZURE_CLIENT_ID")
         insights_connection = _required(values, "APPLICATIONINSIGHTS_CONNECTION_STRING")
         insights_authentication = _required(values, "APPLICATIONINSIGHTS_AUTHENTICATION_STRING")
@@ -156,4 +169,6 @@ class RestoreConfig:
             download_chunk_size=chunk_size,
             max_batch_payload_bytes=max_batch_payload_bytes,
             log_level=values.get("LOG_LEVEL", "INFO").upper(),
+            data_only=mode == "true",
+            preparation_json=values.get("RESTORE_PREPARATION_JSON") or None,
         )

@@ -11,7 +11,12 @@ from azure.data.tables import EdmType, EntityProperty
 from cryptography.exceptions import InvalidTag
 
 from cosmos_table_backup.backup import _object_aad
-from cosmos_table_backup.encryption import ObjectEncryptor, canonical_json, make_bootstrap
+from cosmos_table_backup.encryption import (
+    ObjectEncryptor,
+    canonical_json,
+    decrypt_object,
+    make_bootstrap,
+)
 from cosmos_table_backup.manifest import BackupManifest, TableManifest
 from cosmos_table_backup.restore import RestoreError, RestoreRunner
 from cosmos_table_backup.restore_config import RestoreConfig
@@ -420,3 +425,321 @@ def test_partial_run_without_manifest_is_never_read_or_restored() -> None:
     assert source.reads == []
     assert target.tables == {}
     factory.assert_not_called()
+
+
+class DataOnlyTable(TargetTable):
+    def submit_transaction(self, operations):  # type: ignore[no-untyped-def]
+        self.batch_sizes.append(len(operations))
+        for operation, entity, options in operations:
+            assert operation == "create"
+            assert options == {}
+            self.create_entity(entity)
+
+    def create_entity(self, entity):  # type: ignore[no-untyped-def]
+        key = (entity["PartitionKey"], entity["RowKey"])
+        if key in self.rows:
+            raise RuntimeError("create conflict")
+        self._upsert(entity)
+
+    def upsert_entity(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("data-only must not upsert")
+
+    def query_entities(self, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs in ({"query_filter": ""}, {"query_filter": "", "results_per_page": 1})
+        return list(reversed(list(self.rows.values())))
+
+
+class DataOnlyTarget(Target):
+    def list_tables(self):  # type: ignore[no-untyped-def]
+        raise AssertionError("data-only must not enumerate metadata")
+
+    def delete_table(self, name: str) -> None:
+        raise AssertionError("data-only must not delete tables")
+
+    def create_table(self, name: str) -> TargetTable:
+        raise AssertionError("data-only must not create tables")
+
+    def get_table_client(self, name: str) -> TargetTable:
+        if name not in self.tables:
+            raise ResourceNotFoundError("missing")
+        return self.tables[name]
+
+
+def planned_runner(objects, target=None):  # type: ignore[no-untyped-def]
+    crypto = Mock()
+    crypto.unwrap_key.return_value = SimpleNamespace(key=DEK)
+    logger = Mock()
+    runner = RestoreRunner(
+        config(), Source(objects), target, crypto_factory(crypto), SafeLogger(logger)
+    )
+    return runner, logger
+
+
+def test_plan_is_authenticated_bounded_private_and_has_no_target_access() -> None:
+    import json
+
+    objects, _ = fixture()
+    runner, logger = planned_runner(objects)
+    plan = json.loads(runner.plan())
+    assert plan == {
+        "schema_version": 1,
+        "backup_id": BACKUP_ID,
+        "source_account_resource_id": config().source_account_resource_id,
+        "target_account_resource_id": config().target_account_resource_id,
+        "target_table_endpoint": config().target_table_endpoint,
+        "backup_storage_account_url": config().backup_storage_account_url,
+        "backup_container_name": config().backup_container_name,
+        "manifest_sha256": hashlib.sha256(
+            decrypt_object(
+                DEK,
+                objects[f"backups/{BACKUP_ID}/manifest.enc"],
+                objects[f"backups/{BACKUP_ID}/bootstrap.json"],
+            )
+        ).hexdigest(),
+        "table_names": ["Restored"],
+    }
+    assert logger.info.call_count == 0
+    assert len(runner.plan().encode()) < config().max_manifest_bytes
+
+
+@pytest.mark.parametrize("corruption", ["marker", "bootstrap", "manifest"])
+def test_plan_never_outputs_unauthenticated_manifest(corruption: str) -> None:
+    objects, _ = fixture()
+    runner, _ = planned_runner(objects)
+    if corruption == "marker":
+        runner._source.marker = False  # type: ignore[attr-defined]
+    elif corruption == "bootstrap":
+        path = f"backups/{BACKUP_ID}/bootstrap.json"
+        objects[path] = objects[path].replace(b"RSA-OAEP-256", b"RSA-OAEP-255")
+    else:
+        path = f"backups/{BACKUP_ID}/manifest.enc"
+        objects[path] = objects[path][:-1] + bytes([objects[path][-1] ^ 1])
+    with pytest.raises(RestoreError):
+        runner.plan()
+
+
+def test_data_only_read_create_verification_without_metadata_and_rerun_fails_closed() -> None:
+    objects, entities = fixture(5)
+    planner, _ = planned_runner(objects)
+    target = DataOnlyTarget()
+    target.tables["Restored"] = DataOnlyTable()
+    runner, logger = planned_runner(objects, target)
+    runner._config = replace(config(), data_only=True, preparation_json=planner.plan())
+    report = runner.run()
+    assert report.report_version == 2
+    assert report.status == "data_verified_pending_table_set"
+    assert report.table_set_verified is False
+    assert report.entity_count == 5
+    assert report.tables[0].target_keys_sha256 == unordered_hash(
+        [encode_entity_key(entity) for entity in entities]
+    )
+    assert report.tables[0].target_content_sha256 == unordered_hash(
+        [encode_entity_content(entity) for entity in entities]
+    )
+    events = [call.args[0] for call in logger.info.call_args_list]
+    assert any('"event":"restore.data_verified"' in event for event in events)
+    assert not any('"event":"restore.completed"' in event for event in events)
+    with pytest.raises(RestoreError, match="not empty"):
+        runner.run()
+    assert len(target.tables["Restored"].rows) == 5
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "backup_id",
+        "source_account_resource_id",
+        "target_account_resource_id",
+        "target_table_endpoint",
+        "backup_storage_account_url",
+        "backup_container_name",
+        "manifest_sha256",
+        "table_names",
+        "schema_version",
+        "extra",
+    ],
+)
+def test_data_only_wrong_or_extended_assertion_never_touches_target(field: str) -> None:
+    import json
+
+    objects, _ = fixture()
+    runner, _ = planned_runner(objects, None)
+    plan = json.loads(runner.plan())
+    plan[field] = ["Wrong"] if field == "table_names" else "wrong"
+    runner._config = replace(config(), data_only=True, preparation_json=json.dumps(plan))
+    with pytest.raises(RestoreError, match="binding"):
+        runner.run()
+
+
+@pytest.mark.parametrize("assertion", [None, "[]", "invalid"])
+def test_data_only_missing_or_malformed_assertion_fails_without_target_access(
+    assertion: str | None,
+) -> None:
+    objects, _ = fixture()
+    runner, _ = planned_runner(objects, None)
+    runner._config = replace(config(), data_only=True, preparation_json=assertion)
+    with pytest.raises(RestoreError):
+        runner.run()
+
+
+def test_data_only_missing_expected_table_fails_before_inserts() -> None:
+    objects, _ = fixture()
+    runner, _ = planned_runner(objects, DataOnlyTarget())
+    runner._config = replace(config(), data_only=True, preparation_json=runner.plan())
+    with pytest.raises(RestoreError):
+        runner.run()
+
+
+def two_table_objects() -> dict[str, bytes]:
+    import json
+
+    objects, _ = fixture()
+    prefix = f"backups/{BACKUP_ID}"
+    bootstrap = objects[f"{prefix}/bootstrap.json"]
+    manifest = json.loads(decrypt_object(DEK, objects[f"{prefix}/manifest.enc"], bootstrap))
+    first = manifest["tables"][0]
+    plaintext = decrypt_object(
+        DEK, objects[f"{prefix}/{first['object_name']}"], _object_aad(BACKUP_ID, "table", 0)
+    )
+    second_object = encrypt(plaintext, b"u" * 12, _object_aad(BACKUP_ID, "table", 1))
+    second = {
+        **first,
+        "table_name": "Second",
+        "object_name": "tables/00000001.enc",
+        "encrypted_sha256": hashlib.sha256(second_object).hexdigest(),
+    }
+    manifest["tables"].append(second)
+    objects[f"{prefix}/tables/00000001.enc"] = second_object
+    objects[f"{prefix}/manifest.enc"] = encrypt(canonical_json(manifest), b"m" * 12, bootstrap)
+    return objects
+
+
+def test_data_only_authenticates_all_tables_before_first_insert() -> None:
+    objects = two_table_objects()
+    target = DataOnlyTarget()
+    target.tables = {"Restored": DataOnlyTable(), "Second": DataOnlyTable()}
+    runner, _ = planned_runner(objects, target)
+    runner._config = replace(config(), data_only=True, preparation_json=runner.plan())
+    path = f"backups/{BACKUP_ID}/tables/00000001.enc"
+    objects[path] = objects[path][:-1] + bytes([objects[path][-1] ^ 1])
+    with pytest.raises(RestoreError):
+        runner.run()
+    assert all(not table.rows for table in target.tables.values())
+
+
+def test_data_only_checks_all_tables_empty_before_first_insert() -> None:
+    objects = two_table_objects()
+    target = DataOnlyTarget()
+    target.tables = {"Restored": DataOnlyTable(), "Second": DataOnlyTable()}
+    target.tables["Second"].rows[("old", "row")] = {"PartitionKey": "old", "RowKey": "row"}
+    runner, _ = planned_runner(objects, target)
+    runner._config = replace(config(), data_only=True, preparation_json=runner.plan())
+    with pytest.raises(RestoreError, match="not empty"):
+        runner.run()
+    assert not target.tables["Restored"].rows
+    assert len(target.tables["Second"].rows) == 1
+
+
+def test_data_only_cannot_claim_unexpected_table_absence() -> None:
+    objects, _ = fixture(0)
+    target = DataOnlyTarget()
+    target.tables = {"Restored": DataOnlyTable(), "Unobserved": DataOnlyTable()}
+    runner, _ = planned_runner(objects, target)
+    runner._config = replace(config(), data_only=True, preparation_json=runner.plan())
+    report = runner.run()
+    assert report.status != "succeeded"
+    assert report.table_set_verified is False
+    assert "Unobserved" in target.tables
+
+
+@pytest.mark.parametrize(
+    "fault", ["read_denied", "insert_conflict", "content_mismatch", "key_mismatch"]
+)
+def test_data_only_read_insert_and_final_verification_fail_closed(fault: str) -> None:
+    objects, _ = fixture()
+    target = DataOnlyTarget()
+    table = DataOnlyTable()
+    target.tables["Restored"] = table
+    runner, logger = planned_runner(objects, target)
+    runner._config = replace(config(), data_only=True, preparation_json=runner.plan())
+    if fault == "read_denied":
+        table.query_entities = Mock(side_effect=RuntimeError("denied"))  # type: ignore[method-assign]
+    elif fault == "insert_conflict":
+        table.create_entity = Mock(side_effect=RuntimeError("conflict"))  # type: ignore[method-assign]
+    else:
+        original = table.query_entities
+
+        def altered_query(**kwargs):  # type: ignore[no-untyped-def]
+            rows = original(**kwargs)
+            if rows:
+                rows = [dict(row) for row in rows]
+                if fault == "content_mismatch":
+                    rows[0]["string"] = EntityProperty("changed", EdmType.STRING)
+                else:
+                    rows[0]["RowKey"] = "changed"
+            return rows
+
+        table.query_entities = altered_query  # type: ignore[method-assign]
+    with pytest.raises(RestoreError):
+        runner.run()
+    events = [call.args[0] for call in logger.info.call_args_list]
+    assert any('"event":"restore.failed"' in event for event in events)
+    assert not any('"event":"restore.data_verified"' in event for event in events)
+    assert not any('"event":"restore.completed"' in event for event in events)
+    if fault == "read_denied":
+        assert not table.rows
+
+
+def test_data_only_second_read_uses_first_authenticated_etag() -> None:
+    objects, _ = fixture()
+    target = DataOnlyTarget()
+    target.tables["Restored"] = DataOnlyTable()
+    runner, _ = planned_runner(objects, target)
+    runner._config = replace(config(), data_only=True, preparation_json=runner.plan())
+    source = runner._source
+    original = source.chunks
+    calls = 0
+
+    def changed_etag(name: str, etag: str):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        assert etag == "etag"
+        if calls == 2:
+            raise RuntimeError("conditional ETag mismatch")
+        return original(name, etag)
+
+    source.chunks = changed_etag  # type: ignore[method-assign]
+    with pytest.raises(RestoreError):
+        runner.run()
+    assert calls == 2
+    assert not target.tables["Restored"].rows
+
+
+def test_plan_name_and_serialized_size_bounds() -> None:
+    runner, _ = planned_runner({})
+    with pytest.raises(RestoreError, match="invalid Azure Table name"):
+        runner._plan(BACKUP_ID, {"tables": [{"table_name": "bad/name"}]}, b"manifest")
+    runner._config = replace(config(), max_manifest_bytes=100)
+    with pytest.raises(RestoreError, match="byte bound"):
+        runner._plan(BACKUP_ID, {"tables": [{"table_name": "Valid"}]}, b"manifest")
+
+
+def test_plan_authenticates_every_object_before_private_output() -> None:
+    objects = two_table_objects()
+    runner, logger = planned_runner(objects)
+    path = f"backups/{BACKUP_ID}/tables/00000001.enc"
+    objects[path] = objects[path][:-1] + bytes([objects[path][-1] ^ 1])
+    with pytest.raises(InvalidTag):
+        runner.plan()
+    assert logger.info.call_count == 0
+
+
+def test_plan_rejects_more_than_100_tables_and_16kib_binding() -> None:
+    runner, _ = planned_runner({})
+    with pytest.raises(RestoreError, match="100-table"):
+        runner._plan(
+            BACKUP_ID, {"tables": [{"table_name": f"Table{i}"} for i in range(101)]}, b"manifest"
+        )
+    runner._config = replace(config(), source_account_resource_id="s" * 16384)
+    with pytest.raises(RestoreError, match="byte bound"):
+        runner._plan(BACKUP_ID, {"tables": [{"table_name": "Valid"}]}, b"manifest")

@@ -64,3 +64,24 @@ def test_maximum_conservative_batch_ceiling_is_accepted() -> None:
 def test_restore_guardrails_fail_closed(field: str, value: str) -> None:
     with pytest.raises(ConfigurationError):
         RestoreConfig.from_env({**BASE, field: value})
+
+
+@pytest.mark.parametrize("value", ["", "1", "yes"])
+def test_data_only_mode_flag_is_strict(value: str) -> None:
+    with pytest.raises(ConfigurationError, match="true or false"):
+        RestoreConfig.from_env({**BASE, "RESTORE_DATA_ONLY": value})
+
+
+def test_data_only_requires_pinned_backup_and_bounds_assertion() -> None:
+    with pytest.raises(ConfigurationError, match="explicit RESTORE_BACKUP_ID"):
+        RestoreConfig.from_env({**BASE, "RESTORE_DATA_ONLY": "true"})
+    values = {**BASE, "RESTORE_DATA_ONLY": "true", "RESTORE_BACKUP_ID": str(uuid4())}
+    assert RestoreConfig.from_env(values).data_only is True
+    with pytest.raises(ConfigurationError, match="byte bound"):
+        RestoreConfig.from_env(
+            {
+                **values,
+                "RESTORE_MAX_MANIFEST_BYTES": "65536",
+                "RESTORE_PREPARATION_JSON": "x" * 16385,
+            }
+        )
