@@ -162,6 +162,7 @@ class Orchestrator:
         self.resource_group = resource_group
         self.common = ("--subscription", subscription, "--resource-group", resource_group)
         self.active: tuple[str, str] | None = None
+        self.evidence: dict[str, list[str]] = {}
 
     def job(self, name: str) -> dict:
         return azure("containerapp", "job", "show", *self.common, "--name", name)
@@ -196,6 +197,10 @@ class Orchestrator:
             if entry["name"]
             not in {"RESTORE_BACKUP_ID", "RESTORE_PREPARATION_JSON", "RESTORE_DATA_ONLY"}
         ]
+        container["env"] = [
+            entry for entry in container["env"] if entry["name"] != "GOVERNED_CONSOLE_HOLD_SECONDS"
+        ]
+        container["env"].append({"name": "GOVERNED_CONSOLE_HOLD_SECONDS", "value": "180"})
         if backup_id:
             container["env"].append({"name": "RESTORE_BACKUP_ID", "value": backup_id})
         if preparation is not None:
@@ -242,6 +247,15 @@ class Orchestrator:
                 execution,
             )
             status = value["properties"]["status"]
+            container = (
+                "backup" if name == os.environ.get("BACKUP_JOB_NAME") else "restore-validation"
+            )
+            try:
+                messages = self.messages(name, execution, container)
+                if messages:
+                    self.evidence[execution] = messages
+            except SmokeError:
+                pass
             if status == "Succeeded":
                 self.active = None
                 return
@@ -288,8 +302,11 @@ class Orchestrator:
             timeout=120,
         )
         if result.returncode:
+            if execution in self.evidence:
+                return self.evidence[execution]
             raise SmokeError("Private execution logs unavailable")
-        return log_messages(result.stdout)
+        messages = log_messages(result.stdout)
+        return messages or self.evidence.get(execution, [])
 
     def completion(
         self, name: str, execution: str, container: str, kind: str, backup_id: str | None = None

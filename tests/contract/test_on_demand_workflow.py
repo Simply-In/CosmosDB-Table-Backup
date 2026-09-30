@@ -158,6 +158,7 @@ def test_execution_override_keeps_job_template_and_pins_uuid(monkeypatch):
         assert container["args"] == ["restore-test", "--data-only"]
         assert {entry["name"]: entry["value"] for entry in container["env"]} == {
             "SETTING": "preserved",
+            "GOVERNED_CONSOLE_HOLD_SECONDS": "180",
             "RESTORE_BACKUP_ID": BACKUP,
         }
         return {"name": "execution"}
@@ -184,6 +185,7 @@ def test_deadline_stops_only_owned_execution(monkeypatch):
 def test_failed_runtime_cannot_be_accepted(monkeypatch):
     flow = MODULE.Orchestrator("subscription", "group")
     az = Mock(return_value={"properties": {"status": "Failed"}})
+    flow.messages = Mock(return_value=[])
     monkeypatch.setattr(MODULE, "azure", az)
     with pytest.raises(MODULE.SmokeError):
         flow.wait("restore", "failed", 10)
@@ -290,3 +292,37 @@ def test_workflow_main_environment_and_safe_inputs():
             "group: backup-operations-${{ github.repository }}"
             in (ROOT / ".github/workflows" / filename).read_text()
         )
+
+
+def test_live_evidence_survives_replica_removal_but_requires_terminal_success(monkeypatch):
+    flow = MODULE.Orchestrator("sub", "group")
+    states = iter(["Running", "Succeeded"])
+    monkeypatch.setattr(MODULE, "azure", lambda *args: {"properties": {"status": next(states)}})
+    monkeypatch.setattr(MODULE.time, "sleep", Mock())
+    messages = ['{"event":"restore.data_verified","backup_id":"' + BACKUP + '"}']
+    flow.messages = Mock(side_effect=[messages, MODULE.SmokeError("replica removed")])
+    flow.wait("restore", "execution", 10)
+    assert flow.evidence["execution"] == messages
+    flow.messages = MODULE.Orchestrator.messages.__get__(flow)
+    monkeypatch.setattr(MODULE.subprocess, "run", Mock(return_value=Mock(returncode=1, stdout="")))
+    assert flow.messages("restore", "execution", "restore-validation") == messages
+    assert flow.completion(
+        "restore", "execution", "restore-validation", "restore.data_verified", BACKUP
+    )
+
+
+def test_governed_console_window_is_explicit_and_bounded(monkeypatch):
+    from cosmos_table_backup import supervisor
+
+    sleep = Mock()
+    monkeypatch.setattr(supervisor.time, "sleep", sleep)
+    monkeypatch.delenv("GOVERNED_CONSOLE_HOLD_SECONDS", raising=False)
+    supervisor.collection_window()
+    sleep.assert_not_called()
+    monkeypatch.setenv("GOVERNED_CONSOLE_HOLD_SECONDS", "180")
+    supervisor.collection_window()
+    sleep.assert_called_once_with(180)
+    for value in ("-1", "181", "unbounded"):
+        monkeypatch.setenv("GOVERNED_CONSOLE_HOLD_SECONDS", value)
+        with pytest.raises(ValueError):
+            supervisor.collection_window()
