@@ -1,0 +1,45 @@
+name: Maintenance or research task
+description: Track documentation, maintenance, or an evidence-gathering task.
+labels: ['status:needs-triage']
+body:
+  - type: markdown
+    attributes:
+      value: "Maintainers assign the primary type, area, and priority during triage. Do not include secrets or entity data."
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: deliverables
+    attributes:
+      label: Deliverables and acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Required checks or evidence; use N/A with a reason where appropriate.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and security
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and references
+      description: Use actual issue links or None; distinguish prerequisites from related work.
+    validations:
+      required: true
