@@ -435,6 +435,143 @@ def test_live_evidence_survives_replica_removal_but_requires_terminal_success(mo
     )
 
 
+def console_timeout():
+    return subprocess.TimeoutExpired(
+        "az private-command", 120, output="private partial stdout", stderr="private stderr"
+    )
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_console_timeout_uses_only_execution_cache_without_exposing_output(monkeypatch, cached):
+    flow = MODULE.Orchestrator("sub", "group")
+    messages = [json.dumps({"event": "restore.data_verified", "backup_id": BACKUP})]
+    flow.evidence["another-execution"] = messages
+    if cached:
+        flow.evidence["execution"] = messages
+    run = Mock(side_effect=console_timeout())
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    if cached:
+        assert flow.messages("restore", "execution", "restore-validation") == messages
+    else:
+        with pytest.raises(
+            MODULE.SmokeError, match=r"^Private execution logs unavailable$"
+        ) as error:
+            flow.messages("restore", "execution", "restore-validation")
+        assert error.value.__context__ is None
+    assert run.call_args.kwargs == {"capture_output": True, "text": True, "timeout": 120}
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_console_timeout_polling_continues_until_terminal_success(monkeypatch, cached):
+    flow = MODULE.Orchestrator("sub", "group")
+    flow.active = ("restore", "execution")
+    messages = [json.dumps({"event": "restore.data_verified", "backup_id": BACKUP})]
+    states = iter(["Running", "Running", "Succeeded"])
+    az = Mock(side_effect=lambda *args: {"properties": {"status": next(states)}})
+    run = Mock(side_effect=console_timeout())
+    if cached:
+        run.side_effect = [
+            Mock(returncode=0, stdout=json.dumps({"Log": messages[0]})),
+            console_timeout(),
+            console_timeout(),
+        ]
+    monkeypatch.setattr(MODULE, "azure", az)
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    monkeypatch.setattr(MODULE.time, "monotonic", Mock(return_value=0))
+    sleep = Mock()
+    monkeypatch.setattr(MODULE.time, "sleep", sleep)
+    flow.wait("restore", "execution", 60)
+    assert az.call_count == run.call_count == 3
+    assert sleep.call_args_list == [((15,),), ((15,),)]
+    assert flow.evidence == ({"execution": messages} if cached else {})
+    assert flow.active is None
+
+
+@pytest.mark.parametrize("status", ["Failed", "Stopped", "Canceled", "Cancelled"])
+def test_cached_completion_cannot_override_unsuccessful_runtime_on_timeout(monkeypatch, status):
+    flow = MODULE.Orchestrator("sub", "group")
+    flow.evidence["execution"] = [
+        json.dumps({"event": "restore.data_verified", "backup_id": BACKUP})
+    ]
+    monkeypatch.setattr(MODULE, "azure", Mock(return_value={"properties": {"status": status}}))
+    monkeypatch.setattr(MODULE.subprocess, "run", Mock(side_effect=console_timeout()))
+    monkeypatch.setattr(MODULE.time, "monotonic", Mock(return_value=0))
+    with pytest.raises(MODULE.SmokeError, match="Runtime execution did not succeed"):
+        flow.wait("restore", "execution", 60)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_console_timeout_polling_deadline_stops_only_owned_execution(monkeypatch, cached):
+    flow = MODULE.Orchestrator("sub", "group")
+    flow.active = ("restore", "execution")
+    if cached:
+        flow.evidence["execution"] = [
+            json.dumps({"event": "restore.data_verified", "backup_id": BACKUP})
+        ]
+    az = Mock(return_value={"properties": {"status": "Running"}})
+    monkeypatch.setattr(MODULE, "azure", az)
+    monkeypatch.setattr(MODULE.subprocess, "run", Mock(side_effect=console_timeout()))
+    monkeypatch.setattr(MODULE.time, "monotonic", Mock(side_effect=[0, 0, 60]))
+    monkeypatch.setattr(MODULE.time, "sleep", Mock())
+    with pytest.raises(
+        MODULE.SmokeError, match="Runtime execution exceeded orchestration deadline"
+    ):
+        flow.wait("restore", "execution", 60)
+    assert az.call_count == 2
+    assert az.call_args.args[:3] == ("containerapp", "job", "stop")
+    assert az.call_args.args[-2:] == ("--job-execution-name", "execution")
+    assert flow.active is None
+
+
+def test_completion_accepts_valid_cache_on_console_timeout_after_success(monkeypatch):
+    flow = MODULE.Orchestrator("sub", "group")
+    completion = {"event": "restore.data_verified", "backup_id": BACKUP, "tables": 2}
+    flow.evidence["execution"] = [json.dumps(completion)]
+    monkeypatch.setattr(MODULE, "azure", Mock(return_value={"properties": {"status": "Succeeded"}}))
+    run = Mock(side_effect=console_timeout())
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    monkeypatch.setattr(MODULE.time, "monotonic", Mock(return_value=0))
+    sleep = Mock()
+    monkeypatch.setattr(MODULE.time, "sleep", sleep)
+    flow.wait("restore", "execution", 60)
+    assert (
+        flow.completion(
+            "restore", "execution", "restore-validation", "restore.data_verified", BACKUP
+        )
+        == completion
+    )
+    assert run.call_count == 2
+    sleep.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "cache_kind", ["absent", "empty", "incomplete", "duplicate", "wrong-backup"]
+)
+def test_completion_on_console_timeout_rejects_missing_or_invalid_cache(monkeypatch, cache_kind):
+    flow = MODULE.Orchestrator("sub", "group")
+    message = json.dumps({"event": "restore.data_verified", "backup_id": BACKUP})
+    caches = {
+        "empty": [],
+        "incomplete": [json.dumps({"event": "restore.started", "backup_id": BACKUP})],
+        "duplicate": [message, message],
+        "wrong-backup": [json.dumps({"event": "restore.data_verified", "backup_id": "wrong"})],
+    }
+    if cache_kind in caches:
+        flow.evidence["execution"] = caches[cache_kind]
+    run = Mock(side_effect=console_timeout())
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    sleep = Mock()
+    monkeypatch.setattr(MODULE.time, "sleep", sleep)
+    with pytest.raises(
+        MODULE.SmokeError, match="Completion evidence unavailable; refusing acceptance"
+    ):
+        flow.completion(
+            "restore", "execution", "restore-validation", "restore.data_verified", BACKUP
+        )
+    assert run.call_count == sleep.call_count == 12
+    assert all(call.args == (10,) for call in sleep.call_args_list)
+
+
 def test_governed_console_window_is_explicit_and_bounded(monkeypatch):
     from cosmos_table_backup import supervisor
 

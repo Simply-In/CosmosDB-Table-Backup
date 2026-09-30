@@ -303,31 +303,34 @@ class Orchestrator:
         raise SmokeError("Runtime execution exceeded orchestration deadline")
 
     def messages(self, name: str, execution: str, container: str) -> list[str]:
-        result = subprocess.run(
-            [
-                "az",
-                "containerapp",
-                "job",
-                "logs",
-                "show",
-                *self.common,
-                "--name",
-                name,
-                "--execution",
-                execution,
-                "--container",
-                container,
-                "--tail",
-                "300",
-                "--format",
-                "json",
-                "--only-show-errors",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode:
+        try:
+            result = subprocess.run(
+                [
+                    "az",
+                    "containerapp",
+                    "job",
+                    "logs",
+                    "show",
+                    *self.common,
+                    "--name",
+                    name,
+                    "--execution",
+                    execution,
+                    "--container",
+                    container,
+                    "--tail",
+                    "300",
+                    "--format",
+                    "json",
+                    "--only-show-errors",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            result = None
+        if result is None or result.returncode:
             if execution in self.evidence:
                 return self.evidence[execution]
             raise SmokeError("Private execution logs unavailable")
