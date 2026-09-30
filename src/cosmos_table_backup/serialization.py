@@ -16,6 +16,8 @@ from uuid import UUID, uuid4
 
 from azure.data.tables import EdmType, EntityProperty
 
+from cosmos_table_backup.metrics import StageMetrics
+
 _TYPE_TAGS = {
     EdmType.BINARY: "Binary",
     EdmType.BOOLEAN: "Boolean",
@@ -43,7 +45,9 @@ class OrderIndependentDigest:
         self,
         max_digests_in_memory: int = 32_768,
         scratch_directory: Path | None = None,
+        metrics: StageMetrics | None = None,
     ) -> None:
+        self._metrics = metrics or StageMetrics(enabled=False)
         if max_digests_in_memory < 1:
             raise ValueError("digest memory bound must be positive")
         self._max_in_memory = max_digests_in_memory
@@ -93,9 +97,12 @@ class OrderIndependentDigest:
             return
         path = self._new_chunk_path()
         try:
-            with path.open("xb") as stream:
+            with self._metrics.time("digest_spill_ms"), path.open("xb") as stream:
                 for digest in sorted(self._digests):
                     stream.write(digest)
+            byte_count = len(self._digests) * self._DIGEST_BYTES
+            self._metrics.add("digest_spill_count", 1)
+            self._metrics.add("digest_spill_bytes", byte_count)
         except Exception:
             self.close()
             raise
@@ -113,9 +120,12 @@ class OrderIndependentDigest:
 
     def _merge_chunk_group(self, paths: list[Path]) -> Path:
         merged_path = self._new_chunk_path()
+        byte_count = 0
         with merged_path.open("xb") as output:
             for digest in heapq.merge(*(self._read_chunk(path) for path in paths)):
                 output.write(digest)
+                byte_count += self._DIGEST_BYTES
+        self._metrics.add("digest_merge_write_bytes", byte_count)
         for path in paths:
             path.unlink()
         return merged_path
@@ -139,11 +149,12 @@ class OrderIndependentDigest:
             raise ValueError("digest is closed")
         aggregate = hashlib.sha256()
         try:
-            if self._chunk_paths:
-                self._update_from_chunks(aggregate)
-            else:
-                for digest in sorted(self._digests):
-                    aggregate.update(digest)
+            with self._metrics.time("digest_merge_ms"):
+                if self._chunk_paths:
+                    self._update_from_chunks(aggregate)
+                else:
+                    for digest in sorted(self._digests):
+                        aggregate.update(digest)
             return aggregate.hexdigest()
         finally:
             self.close()

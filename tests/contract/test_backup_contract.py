@@ -148,11 +148,55 @@ def test_complete_backup_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     events = [call.args[0] for call in raw_logger.info.call_args_list]
     assert sum('"event":"backup.completed"' in event for event in events) == 1
     assert all('"event":"backup.failed"' not in event for event in events)
+    records = [json.loads(event) for event in events]
+    table_metrics = [event for event in records if event["event"] == "table_completed"]
+    completed = next(event for event in records if event["event"] == "backup.completed")
+    for index, measurement in enumerate(table_metrics):
+        encrypted = blobs.objects[prefix + f"tables/{index:08d}.enc"]
+        assert measurement["byte_count"] == len(encrypted)
+        assert measurement["plaintext_byte_count"] == len(encrypted) - 33
+        assert measurement["page_count"] == 2
+        assert measurement["stage_block_bytes"] == len(encrypted)
+        assert measurement["duration_ms"] > 0
+        assert measurement["entities_per_second"] > 0
+        assert measurement["plaintext_bytes_per_second"] > 0
+        assert measurement["digest_spill_count"] == 0
+        assert measurement["digest_merge_ms"] >= 0
+        assert "table_name" not in measurement
+    assert completed["entity_count"] == 2
+    assert completed["page_count"] == 4
+    assert completed["byte_count"] == sum(item["byte_count"] for item in table_metrics)
+    assert completed["stage_block_bytes"] == sum(map(len, blobs.objects.values()))
+    assert completed["stage_block_count"] == sum(kind == "stage" for kind, _ in blobs.events)
+    assert completed["duration_ms"] >= sum(item["duration_ms"] for item in table_metrics)
 
     changed_bootstrap = {**bootstrap, "key_id": "https://attacker.invalid/keys/k/v"}
     changed_bootstrap_bytes = canonical_json(changed_bootstrap)
     with pytest.raises(InvalidTag):
         decrypt_object(b"d" * 32, encoded_manifest, changed_bootstrap_bytes)
+
+
+def test_instrumentation_does_not_change_backup_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cosmos_table_backup.backup.uuid4", lambda: "fixed-test-run")
+    monkeypatch.setattr("cosmos_table_backup.backup._now", lambda: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr("cosmos_table_backup.backup.generate_dek", lambda: b"d" * 32)
+    monkeypatch.setattr(
+        "cosmos_table_backup.backup.NonceFactory",
+        lambda: Mock(generate=Mock(side_effect=[b"m" * 12, b"a" * 12, b"b" * 12])),
+    )
+    results = []
+    for enabled in (False, True):
+        blobs = Container()
+        BackupRunner(
+            config(),
+            Tables(),
+            blobs,
+            crypto(),
+            SafeLogger(Mock()),
+            instrumentation_enabled=enabled,
+        ).run()
+        results.append((blobs.objects, blobs.events))
+    assert results[0] == results[1]
 
 
 @pytest.mark.parametrize("block_size", [16, 32])

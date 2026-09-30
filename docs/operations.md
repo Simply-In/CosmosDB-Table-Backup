@@ -96,7 +96,86 @@ The platform creates these always-enabled scheduled-query alerts:
 - **backup failure:** severity 1, evaluated every 5 minutes over 10 minutes, when `backup.failed` appears;
 - **backup dead-man:** severity 0, evaluated hourly, when no `backup.completed` appears for 26 hours (query override range 48 hours).
 
-The action group uses configured `alertEmails`; the nonproduction default is empty, so alerts exist without email recipients. Validate alert queries against actual `AppTraces` ingestion before enabling the schedule. Logs may contain run ID, table name, object path, counts, duration, status, and sanitized error type/code. They must not contain entity values, plaintext/wrapped keys, access tokens, SAS tokens, or connection strings.
+The action group uses configured `alertEmails`; the nonproduction default is empty, so alerts exist without email recipients. Validate alert queries against actual `AppTraces` ingestion before enabling the schedule. Application telemetry is allowlisted: event, run ID, numeric table index/count, numeric measurements, status, and sanitized exception type. Table names, object paths, entity keys/values, plaintext/wrapped keys, access tokens, SAS tokens, and connection strings are not telemetry fields. Do not enable unsanitized Azure SDK HTTP logging.
+
+### Interpret stage-level backup telemetry
+
+`table_completed` adds one numeric summary per successful table; `backup.completed` adds the aggregate only after the create-only manifest commit. Existing entity/byte counters and event names remain unchanged. `backup.failed` includes elapsed time and sanitized exception type, not an exception message or partial success summary. A completed table does not imply a completed backup.
+
+All durations are monotonic elapsed milliseconds, not CPU time. Rates use bytes/second (not MiB/second), and zero duration produces zero rates. Counters/totals and maxima use a fixed number of numeric accumulators; no per-entity, per-page, per-block history or percentile sample is retained.
+
+| Fields | Meaning and boundaries |
+|---|---|
+| `duration_ms`, `entities_per_second` | Table processing including cleanup, or the entire run including discovery, key wrapping and metadata commits. |
+| `entity_count`, `byte_count`, `plaintext_byte_count` | Table entity count, encrypted table-object bytes (including 33-byte framing), and encoded entity bytes. Run totals sum table payloads only, excluding bootstrap/manifest bytes. |
+| `plaintext_bytes_per_second`, `encrypted_bytes_per_second` | Respective table payload totals divided by the table/run duration. |
+| `page_count`, `page_fetch_ms`, `page_fetch_max_ms` | Successful logical SDK page advances (including empty pages), summed advance time, and maximum advance time. The terminal iterator probe contributes time but no count. |
+| `stage_block_count`, `stage_block_bytes`, `stage_block_ms`, `stage_block_max_ms` | Successful staged-block count/bytes, summed SDK staging time, and maximum staging time. Run totals include bootstrap/manifest staging as well as table data. |
+| `blob_commit_ms` | Summed create-only SDK commit time; run totals include metadata commits. |
+| `digest_spill_count`, `digest_spill_bytes`, `digest_spill_ms` | Combined successful spill count/bytes for both digest streams; sorting and spill file-write elapsed time. |
+| `digest_merge_ms`, `digest_merge_write_bytes` | Combined final digest calculation time (including in-memory sorting, final spill, consolidation and read/hash); bytes written by intermediate consolidation, not final hashing. Final spill time is nested inside final calculation time: do not sum them as disjoint stages. |
+| `digest_scratch_peak_bytes_bound` | Conservative logical-file byte bound: twice combined spill bytes, permitting simultaneous merge input/output. Not a sampled filesystem peak or allocated disk usage. Run value is the maximum table bound because tables are sequential. |
+| `local_processing_ms` | Table elapsed time minus page advance, stage and commit time, clamped to zero. Includes serialization, hashes, AES-GCM, digest/scratch I/O, setup, cleanup and instrumentation. Digest timers are subsets of this residual; do not add them again. Run value sums table residuals, excluding run setup/metadata work. |
+
+The pinned Table SDK materializes and converts the returned page before `next(pages)` returns. Consequently page time includes network/retry/backoff, response decoding and SDK entity conversion, but excludes our consumer serialization/encryption work. It is **not pure Cosmos service time**. Staging/commit time likewise includes SDK overhead and retries. These counters are logical operations, **not physical HTTP attempts**, and do not claim retry count, per-request RU charge, or throttling status. Timer contexts close even when an operation raises; failures still propagate and do not emit a success summary.
+
+Use page time as a source-read indicator, staging/commit time as a Blob-write indicator, and the local residual plus digest timings as a CPU/local-I/O indicator. Separate CPU utilization and disk measurements are needed to split CPU from local I/O. Compare stage proportions and external service metrics rather than attributing every millisecond to a server.
+
+### Reproduce the offline synthetic baseline
+
+From the repository root, use the pinned development environment from [CONTRIBUTING](../CONTRIBUTING.md):
+
+```bash
+uv sync --frozen --all-extras --no-install-project --no-build
+PYTHONPATH=src uv run --frozen --no-sync --no-build python scripts/benchmark-backup.py --tracemalloc
+```
+
+The default is one table with 70,000 unique synthetic rows, 16 round-robin partitions, a 256-byte ASCII payload property plus typed keys/ordinal, 1,000 entities/page, 4 MiB blocks, and three alternating enabled/disabled pairs. Defaults for the real pipeline's paging, blocks and digest algorithms are not changed. The workload uses bounded `ItemPaged` pages, actual typed encoding/hashing/AES-GCM/Blob-writer processing, a non-retaining Blob sink, and fake key wrapping. No Azure clients/network calls are constructed. Each run verifies create-only manifest-last completion and scratch cleanup; the discarded bytes and fake wrapped key **do not constitute a recoverable backup**.
+
+The JSON includes settings, application/Python/platform versions, each enabled completion summary, each paired wall duration, median difference, process RSS high-water, and optionally a **separate** tracemalloc pass. The disabled comparison turns off new stage accumulators/clocks, not completion logging, run clocks or metric-call scaffolding: it estimates enabled instrumentation cost, not an exact pre-change binary comparison. Do not run tracemalloc during paired timing. RSS includes imports, all pairs and the traced pass; tracemalloc is Python-tracked allocations only, excluding untracked native SDK/crypto allocations. Neither is a per-table production RSS measurement.
+
+Recorded offline baseline: Python 3.14.7, application 0.1.0, Darwin arm64, pinned `uv.lock` (Table SDK 12.7.0, azure-core 1.41.0, Blob SDK 12.30.3), the default workload above. This is a local measurement, not a service throughput/RU result:
+
+| Measurement | Recorded result |
+|---|---:|
+| Disabled wall durations | 1504.27, 1523.26, 1522.22 ms |
+| Enabled wall durations | 1544.11, 1496.24, 1485.23 ms |
+| Median disabled / enabled wall | 1522.22 / 1496.24 ms |
+| Median wall difference | −1.71%; within observed run variation, **not evidence of a speedup or a guaranteed overhead bound** |
+| Median enabled run throughput | 46,787 entities/s; 21,561,359 plaintext bytes/s; 21,561,381 encrypted bytes/s |
+| Payload bytes | 32,258,890 plaintext; 32,258,923 encrypted |
+| Page count / median page time | 70 / 29.92 ms |
+| Table blocks / run blocks | 8 / 10 (including bootstrap/manifest) |
+| Median run stage / commit time | 0.008 / 0.008 ms (discard sink; not Blob latency) |
+| Median local / final digest / spill time | 1466.10 / 76.40 / 27.32 ms (nested digest timings) |
+| Digest spills / bytes / intermediate merge writes | 6 / 4,480,000 / 0 bytes |
+| Logical scratch bound | 8,960,000 bytes |
+| Separate traced allocation peak | 13,632,916 bytes |
+| Process lifetime RSS high-water | 305,168,384 bytes (includes traced pass) |
+
+The default exercises disk spills, but not fan-in consolidation; bounded consolidation is covered by unit tests. Each digest stream retains at most 32,768 32-byte digests plus bounded merge buffers (fan-in 32), while Python object/list overhead and the configured page/block buffers also consume memory. Instrumentation adds a fixed field dictionary per active table/run; it introduces no task/queue concurrency. The scratch byte bound scales with spilled entity count and is not a disk quota. Larger runs require sufficient approved scratch capacity.
+
+To demonstrate discrimination without claiming service behavior, repeat controlled delays:
+
+```bash
+PYTHONPATH=src uv run --frozen --no-sync --no-build python scripts/benchmark-backup.py --entities 1000 --page-size 100 --block-size 65536 --page-delay-ms 20
+PYTHONPATH=src uv run --frozen --no-sync --no-build python scripts/benchmark-backup.py --entities 1000 --page-size 100 --block-size 65536 --stage-delay-ms 20
+```
+
+Three-pair median enabled results on the same host were respectively: run/page/stage/local **411.20/283.82/0.03/126.18 ms**, and **396.10/2.60/282.46/113.29 ms**. Scheduler sleep overshoot is included; these are simulated waits, not measured Cosmos or Blob latency. The zero-delay baseline is predominantly local processing. Repeat measurements on a quiet host, retain numeric JSON with the commit/lock/image identity, and compare identical workloads; do not generalize these small samples to production.
+
+### Correlate with Azure Monitor and complete the real-service gate
+
+**An explicitly approved nonproduction benchmark is still required. No Azure benchmark, RU/throttle correlation, deployment or production access is authorized by the offline procedure.** Obtain approval for the synthetic source, destination, region/capacity mode, entity population, RU/cost budget, run count and cleanup first. Populate only the approved synthetic nonproduction source using an independently authorized writer; the backup identity remains read-only and never writes to the production source.
+
+1. Record the exact commit, image digest, lockfile/SDK versions, job CPU/memory limits, page/block settings, entity size/count/property mix and partition distribution. Use the same workload for each comparison. Keep `cards` and configured exclusions protected; do not change concurrency, encryption or verification to improve the result.
+2. Capture the execution's UTC start/end and backup ID. Verify a committed manifest and all integrity/restore checks under existing nonproduction acceptance gates. Record numeric completion summaries and external CPU/RSS/disk observations; retain no source keys/values or raw SDK response/header logs.
+3. Inspect the **actual Table account's** metric definitions and available dimensions in Azure Monitor. Correlate available request counts/status (including 429), latency and RU/capacity metrics over the same UTC window, at their supported grain (often one minute). Where present, filter account/database/table or collection, region and read operation; isolate other traffic. The service does not share our backup ID: correlation is temporal, not a per-request join.
+4. Record exact metric names, dimensions, aggregation, grain, missing metrics and background traffic. Use sum for count/consumed-unit metrics where supported, and documented latency aggregations. Check retry/backoff overlap against page/staging durations, but do not derive physical attempt counts from logical page counts. A retry-hidden 429 may not reach the application; external status metrics are essential.
+5. Verify API applicability before reporting RU: the published database-account catalog describes `TotalRequestUnits` as **SQL** request units. Its availability/name is not evidence of Table API charge accounting. If Table-specific RU/status/latency evidence cannot be obtained through supported account metrics or approved diagnostics, mark that gate unresolved rather than substituting SQL behavior or estimating charges from entities. `ServerSideLatency` is deprecated; validate the account/API applicability of replacement gateway/direct latency metrics before using them.
+6. Compare repeated identical runs and separately measure enabled instrumentation overhead/resources. Report workload, elapsed/rates, page/stage/digest timings, peak memory/scratch methodology, RU/throttling availability and limitations. Only after this evidence is recorded can the real-service acceptance criterion be marked complete.
+
+References: [SDK PageIterator](https://learn.microsoft.com/python/api/azure-core/azure.core.paging.pageiterator?view=azure-python), [monitor Azure Cosmos DB](https://learn.microsoft.com/en-us/azure/cosmos-db/monitor), and [database-account supported metrics](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-documentdb-databaseaccounts-metrics). SQL examples in these references do not establish Table-specific SDK charge/retry behavior.
 
 ### Triage a failed backup
 
