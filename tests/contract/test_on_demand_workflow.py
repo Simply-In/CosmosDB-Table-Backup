@@ -4,6 +4,8 @@ import base64
 import hashlib
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -192,7 +194,10 @@ def test_failed_runtime_cannot_be_accepted(monkeypatch):
     assert az.call_count == 1
 
 
-def test_main_requires_aggregate_runtime_and_arm_evidence(monkeypatch, tmp_path):
+@pytest.mark.parametrize("custom_report", [False, True])
+def test_main_requires_aggregate_runtime_and_arm_evidence(
+    monkeypatch, tmp_path, capsys, custom_report
+):
     source = SOURCE
     target = (
         "/subscriptions/sub/resourceGroups/group"
@@ -258,13 +263,18 @@ def test_main_requires_aggregate_runtime_and_arm_evidence(monkeypatch, tmp_path)
     monkeypatch.setattr(MODULE, "azure", Mock(return_value=live))
     monkeypatch.setattr(MODULE, "decode_plan", Mock(return_value=decoded))
     monkeypatch.setattr(MODULE.signal, "signal", Mock())
-    report = tmp_path / "result.json"
+    monkeypatch.chdir(tmp_path)
+    report = tmp_path / ("result.json" if custom_report else "smoke-result.json")
     monkeypatch.setattr(MODULE, "REPORT", {"schema_version": 1})
-    monkeypatch.setattr(
-        "sys.argv", ["run-on-demand.py", "--backup-id", BACKUP, "--report", str(report)]
-    )
+    monkeypatch.setattr(MODULE, "REPORT_PATH", Path("smoke-result.json"))
+    arguments = ["run-on-demand.py", "--backup-id", BACKUP]
+    if custom_report:
+        arguments.extend(["--report", str(report)])
+    monkeypatch.setattr("sys.argv", arguments)
     assert MODULE.main() == 0
     result = json.loads(report.read_text())
+    if custom_report:
+        assert not (tmp_path / "smoke-result.json").exists()
     assert result["status"] == "passed" and result["table_set_verified"]
     assert result["entities"] == 14
     assert "tables" not in result or result["tables"] == 2
@@ -273,6 +283,120 @@ def test_main_requires_aggregate_runtime_and_arm_evidence(monkeypatch, tmp_path)
     flow.start.side_effect = ["planning", "restore-run"]
     with pytest.raises(MODULE.SmokeError):
         MODULE.main()
+    flow.tables.return_value = {"Alpha", "Bravo"}
+    flow.start.side_effect = ["planning", "restore-run"]
+    capsys.readouterr()
+    monkeypatch.setattr(Path, "write_text", Mock(side_effect=OSError("private-path")))
+    with pytest.raises(OSError):
+        MODULE.main()
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("destination", [None, "custom.json", "absolute"])
+def test_cli_configuration_failure_honors_report_destination(tmp_path, destination):
+    report = tmp_path / ("smoke-result.json" if destination is None else "custom.json")
+    arguments = []
+    if destination is not None:
+        arguments = ["--report", str(report) if destination == "absolute" else destination]
+    process = subprocess.run(  # noqa: S603
+        [sys.executable, str(ROOT / "scripts/run-on-demand.py"), *arguments],
+        cwd=tmp_path,
+        env={"PATH": ""},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert process.returncode == 1
+    assert process.stderr == ""
+    expected = {
+        "schema_version": 1,
+        "status": "failed",
+        "stage": "configuration",
+        "error_type": "SmokeError",
+    }
+    assert json.loads(report.read_text()) == json.loads(process.stdout) == expected
+    assert set(tmp_path.iterdir()) == {report}
+
+
+@pytest.mark.parametrize("destination", ["private-directory", "private-missing/report.json"])
+def test_cli_unwritable_report_fails_without_traceback_or_fallback(tmp_path, destination):
+    directory = tmp_path / "private-directory"
+    directory.mkdir()
+    process = subprocess.run(  # noqa: S603
+        [sys.executable, str(ROOT / "scripts/run-on-demand.py"), "--report", destination],
+        cwd=tmp_path,
+        env={"PATH": ""},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert process.returncode == 1
+    assert process.stderr == ""
+    assert json.loads(process.stdout) == {
+        "schema_version": 1,
+        "status": "failed",
+        "stage": "configuration",
+        "error_type": "IsADirectoryError" if destination == directory.name else "FileNotFoundError",
+    }
+    assert set(tmp_path.iterdir()) == {directory}
+
+
+def test_cli_subprocess_failure_keeps_diagnostics_private(tmp_path):
+    # Inject a subprocess exception offline; no Azure executable or credentials are available.
+    harness = """
+import runpy
+import subprocess
+import sys
+
+def fail(*args, **kwargs):
+    raise subprocess.TimeoutExpired(
+        ["az", "private-command"], 180, output="private-stdout", stderr="private-stderr"
+    )
+
+subprocess.run = fail
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+    environment = {
+        name: "offline-private-value"
+        for name in (
+            "SUBSCRIPTION_ID",
+            "RESOURCE_GROUP",
+            "SOURCE_ACCOUNT_ID",
+            "BACKUP_JOB_NAME",
+            "RESTORE_JOB_NAME",
+            "REGISTRY_SERVER",
+        )
+    }
+    process = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            harness,
+            str(ROOT / "scripts/run-on-demand.py"),
+            "--report",
+            "custom.json",
+        ],
+        cwd=tmp_path,
+        env={**environment, "PATH": ""},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert process.returncode == 1
+    assert process.stderr == ""
+    report = tmp_path / "custom.json"
+    assert (
+        json.loads(report.read_text())
+        == json.loads(process.stdout)
+        == {
+            "schema_version": 1,
+            "status": "failed",
+            "stage": "configuration",
+            "error_type": "TimeoutExpired",
+        }
+    )
+    assert set(tmp_path.iterdir()) == {report}
 
 
 def test_workflow_main_environment_and_safe_inputs():
