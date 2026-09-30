@@ -93,14 +93,19 @@ def test_restore_key_uri_preserves_cloud_suffix(suffix: str) -> None:
     assert ".." not in uri
 
 
-def test_restore_metadata_operations_keep_local_authentication_disabled() -> None:
+def test_restore_account_disables_key_auth_metadata_writes_and_public_access() -> None:
     bicep = (ROOT / "infra/deployment/backup.bicep").read_text()
     target = bicep.split("module restoreAccount ", 1)[1].split("module cosmosPrivateEndpoint", 1)[0]
     assert "disableLocalAuthentication: true" in target
-    assert "disableKeyBasedMetadataWriteAccess: false" in target
+    assert "disableKeyBasedMetadataWriteAccess: true" in target
     assert "publicNetworkAccess: 'Disabled'" in target
     assert "networkAclBypass: 'None'" in target
     assert "minimumTlsVersion: 'Tls12'" in target
+    assert "ipRules: []" in target
+    assert "virtualNetworkRules: []" in target
+    assert "subnetResourceId: peSubnetId" in target
+    assert "service: 'Table'" in target
+    assert "privateDnsZoneResourceId: cosmosZoneId" in target
 
 
 def test_restore_grants_are_scoped_and_table_native() -> None:
