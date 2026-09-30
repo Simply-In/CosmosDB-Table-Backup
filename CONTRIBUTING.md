@@ -112,6 +112,7 @@ Examples:
 Repository label management requires explicit permission. Review catalog changes before applying them. This create-missing procedure uses `gh` and `jq`, preserves all existing label metadata, and never deletes unknown labels:
 
 ```bash
+set -euo pipefail
 repo=smereczynski/CosmosDB-Table-Backup
 catalog=.github/labels.json
 existing=$(gh label list --repo "$repo" --limit 1000 --json name)
