@@ -55,6 +55,11 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Sign in to ACR with OIDC identity
         run: az acr login --name "$REGISTRY_NAME"
+      - name: Build and verify runtime image before publishing
+        run: |
+          tag="$REGISTRY_SERVER/cosmos-table-backup:${GITHUB_SHA}"
+          docker buildx build --platform linux/amd64 --tag "$tag" --load .
+          IMAGE="$tag" ./scripts/smoke-test-image.sh
       - name: Build and push immutable image
         run: |
           tag="$REGISTRY_SERVER/cosmos-table-backup:${GITHUB_SHA}"
