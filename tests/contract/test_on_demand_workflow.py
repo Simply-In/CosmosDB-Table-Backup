@@ -326,3 +326,11 @@ def test_governed_console_window_is_explicit_and_bounded(monkeypatch):
         monkeypatch.setenv("GOVERNED_CONSOLE_HOLD_SECONDS", value)
         with pytest.raises(ValueError):
             supervisor.collection_window()
+
+
+def test_pinned_cli_unescaped_log_envelope_is_parsed_strictly():
+    payload = json.dumps({"event": "backup.completed", "backup_id": BACKUP})
+    raw = '{"TimeStamp":"2026-09-30T17:28:36.3756046+00:00","Log":"F ' + payload + '"}'
+    messages = MODULE.log_messages(raw)
+    assert MODULE.event(messages, "backup.completed")["backup_id"] == BACKUP
+    assert MODULE.log_messages('{"unexpected":"F ' + payload + '"}') == []
