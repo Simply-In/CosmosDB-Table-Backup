@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Mapping
 from typing import Any, Final
 
@@ -11,22 +12,10 @@ from azure.monitor.opentelemetry import configure_azure_monitor
 
 from cosmos_table_backup.metrics import METRIC_FIELDS
 
-_ALLOWED_FIELDS: Final = (
-    frozenset(
-        {
-            "event",
-            "backup_id",
-            "table_index",
-            "table_count",
-            "entity_count",
-            "byte_count",
-            "duration_ms",
-            "status",
-            "error_type",
-        }
-    )
-    | METRIC_FIELDS
+_NUMERIC_FIELDS: Final = METRIC_FIELDS | frozenset(
+    {"table_index", "table_count", "entity_count", "byte_count", "duration_ms"}
 )
+_ALLOWED_FIELDS: Final = _NUMERIC_FIELDS | frozenset({"event", "backup_id", "status", "error_type"})
 
 
 class SafeLogger:
@@ -35,7 +24,14 @@ class SafeLogger:
 
     def emit(self, event: str, **fields: object) -> None:
         record: dict[str, object] = {"event": event}
-        record.update({key: value for key, value in fields.items() if key in _ALLOWED_FIELDS})
+        for key, value in fields.items():
+            if key not in _ALLOWED_FIELDS:
+                continue
+            if key in _NUMERIC_FIELDS and not (
+                type(value) is int or (type(value) is float and math.isfinite(value))
+            ):
+                continue
+            record[key] = value
         self._logger.info(json.dumps(record, separators=(",", ":"), sort_keys=True))
 
 

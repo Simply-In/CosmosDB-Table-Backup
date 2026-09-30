@@ -50,6 +50,18 @@ Set the same human as a PR assignee at creation, or immediately afterward using 
 
 Assignment and linking are part of user-authorized issue work or PR creation. This policy does not independently authorize publishing branches, creating or merging PRs, manually closing issues, or changing repository access.
 
+## Updating issue acceptance after a pull request
+
+GitHub Copilot and all other coding agents must maintain acceptance checklists automatically as part of user-authorized issue work, without a separate reminder. On learning that a PR has been merged, and before reporting post-merge completion or resuming related issue work, read the live PR state, merge commit, target branch and each issue whose acceptance criteria the PR advances. Do not treat PR creation, approval, passing CI, or closure without merge as delivery.
+
+- Compare every relevant acceptance criterion with the merged changes and actual validation evidence. Update the checklist in the **issue body**, not only a PR description or issue comment, even when the PR uses `Refs` and completes only part of the issue.
+- Check only fully satisfied criteria. Keep partially satisfied or unvalidated criteria unchecked and describe completed subparts, remaining work and evidence limitations separately. Distinguish offline measurements from real-service validation and an intermediate stacked-branch merge from delivery to the required integration branch.
+- Preserve criterion wording, unrelated issue content and other contributors' progress. Re-read the issue before editing and reconcile concurrent changes rather than overwriting a stale body. Repeated reconciliation must not duplicate progress notes or undo valid checked items; if current evidence contradicts an existing check, explain the discrepancy and correct only the affected item.
+- Add or update a concise progress note linking the merged PR, identifying the satisfied and outstanding criteria, and recording actual tests/results and external validation gates. Keep a partially completed issue open; never add a closing reference or manually close it just because one PR merged.
+- Read back the issue after editing and verify the checklist, evidence note and intended issue state. Report the update as complete only after verification. If authentication, permissions, unavailable evidence or tool limitations prevent reconciliation, report the exact blocker and request only the needed action; do not silently skip it.
+
+Agents cannot observe future merges while inactive. If the PR is still open when handing off, state that acceptance reconciliation remains pending and must run at the next merge notification, post-merge check-in or resumed related work. These instructions require reconciliation whenever the agent observes the merge; they do not create a background automation or authorize merging PRs, publishing branches, deployments, access changes or unrelated issue edits.
+
 ## Label catalog and policy
 
 [`.github/labels.json`](.github/labels.json) is the canonical name/color/description catalog. Preserve existing GitHub labels; do not rename/delete them or add ad hoc synonyms. Amend the catalog and guidance together when changing policy.

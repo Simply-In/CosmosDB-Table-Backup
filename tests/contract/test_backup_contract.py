@@ -176,7 +176,7 @@ def test_complete_backup_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         decrypt_object(b"d" * 32, encoded_manifest, changed_bootstrap_bytes)
 
 
-def test_instrumentation_does_not_change_backup_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_telemetry_timing_does_not_change_backup_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cosmos_table_backup.backup.uuid4", lambda: "fixed-test-run")
     monkeypatch.setattr("cosmos_table_backup.backup._now", lambda: "2026-01-01T00:00:00Z")
     monkeypatch.setattr("cosmos_table_backup.backup.generate_dek", lambda: b"d" * 32)
@@ -185,16 +185,13 @@ def test_instrumentation_does_not_change_backup_bytes(monkeypatch: pytest.Monkey
         lambda: Mock(generate=Mock(side_effect=[b"m" * 12, b"a" * 12, b"b" * 12])),
     )
     results = []
-    for enabled in (False, True):
+    for clock_step in (0.001, 1.0):
+        monkeypatch.setattr(
+            "cosmos_table_backup.metrics.perf_counter",
+            Mock(side_effect=[tick * clock_step for tick in range(1000)]),
+        )
         blobs = Container()
-        BackupRunner(
-            config(),
-            Tables(),
-            blobs,
-            crypto(),
-            SafeLogger(Mock()),
-            instrumentation_enabled=enabled,
-        ).run()
+        BackupRunner(config(), Tables(), blobs, crypto(), SafeLogger(Mock())).run()
         results.append((blobs.objects, blobs.events))
     assert results[0] == results[1]
 
