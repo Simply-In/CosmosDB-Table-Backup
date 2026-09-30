@@ -30,6 +30,7 @@ PLAN_DEADLINE_SECONDS = 3600
 DATA_DEADLINE_SECONDS = 7200
 
 REPORT: dict = {"schema_version": 1, "status": "started", "stage": "configuration"}
+REPORT_PATH = Path("smoke-result.json")
 
 
 class SmokeError(RuntimeError):
@@ -381,10 +382,14 @@ class Orchestrator:
 
 
 def main() -> int:
+    global REPORT_PATH
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backup-id", default="", help="Empty starts a fresh backup first")
-    parser.add_argument("--report", default="smoke-result.json")
+    parser.add_argument(
+        "--report", default="smoke-result.json", help="JSON destination for success or failure"
+    )
     arguments = parser.parse_args()
+    REPORT_PATH = Path(arguments.report)
     required = [
         "SUBSCRIPTION_ID",
         "RESOURCE_GROUP",
@@ -540,7 +545,7 @@ def main() -> int:
             "table_set_verified": True,
         }
     )
-    Path(arguments.report).write_text(json.dumps(result, indent=2) + "\n")
+    REPORT_PATH.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
     return 0
 
@@ -551,6 +556,9 @@ if __name__ == "__main__":
     except Exception as exc:
         # Never print unsanitized Azure errors, console logs, or private table plans.
         REPORT.update({"status": "failed", "error_type": type(exc).__name__})
-        Path("smoke-result.json").write_text(json.dumps(REPORT, indent=2) + "\n")
+        try:
+            REPORT_PATH.write_text(json.dumps(REPORT, indent=2) + "\n")
+        except OSError as report_error:
+            REPORT["error_type"] = type(report_error).__name__
         print(json.dumps(REPORT))
         raise SystemExit(1) from None
