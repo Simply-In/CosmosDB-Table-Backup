@@ -18,7 +18,19 @@ import time
 from pathlib import Path
 from uuid import UUID
 
+BACKUP_WORK_SECONDS = 7200
+CONSOLE_HOLD_SECONDS = 180
+BACKUP_PROCESS_MARGIN_SECONDS = 120
+BACKUP_REPLICA_TIMEOUT_SECONDS = (
+    BACKUP_WORK_SECONDS + CONSOLE_HOLD_SECONDS + BACKUP_PROCESS_MARGIN_SECONDS
+)
+BACKUP_STATUS_MARGIN_SECONDS = 300
+BACKUP_DEADLINE_SECONDS = BACKUP_REPLICA_TIMEOUT_SECONDS + BACKUP_STATUS_MARGIN_SECONDS
+PLAN_DEADLINE_SECONDS = 3600
+DATA_DEADLINE_SECONDS = 7200
+
 REPORT: dict = {"schema_version": 1, "status": "started", "stage": "configuration"}
+REPORT_PATH = Path("smoke-result.json")
 
 
 class SmokeError(RuntimeError):
@@ -189,8 +201,16 @@ class Orchestrator:
     ) -> str:
         self.idle(name)
         current = self.job(name)
-        if current["properties"]["template"] != job["properties"]["template"]:
-            raise SmokeError("Job template changed during orchestration")
+        if current["properties"]["template"] != job["properties"]["template"] or current[
+            "properties"
+        ].get("configuration") != job["properties"].get("configuration"):
+            raise SmokeError("Job configuration changed during orchestration")
+        if not arguments and (
+            type(job["properties"].get("configuration", {}).get("replicaTimeout")) is not int
+            or job["properties"]["configuration"]["replicaTimeout"]
+            != BACKUP_REPLICA_TIMEOUT_SECONDS
+        ):
+            raise SmokeError("Backup job must reserve the governed timeout budget")
         template = json.loads(json.dumps(job["properties"]["template"]))
         container = template["containers"][0]
         container["command"] = ["python", "-m", "cosmos_table_backup.cli"]
@@ -204,7 +224,9 @@ class Orchestrator:
         container["env"] = [
             entry for entry in container["env"] if entry["name"] != "GOVERNED_CONSOLE_HOLD_SECONDS"
         ]
-        container["env"].append({"name": "GOVERNED_CONSOLE_HOLD_SECONDS", "value": "180"})
+        container["env"].append(
+            {"name": "GOVERNED_CONSOLE_HOLD_SECONDS", "value": str(CONSOLE_HOLD_SECONDS)}
+        )
         if backup_id:
             container["env"].append({"name": "RESTORE_BACKUP_ID", "value": backup_id})
         if preparation is not None:
@@ -363,10 +385,14 @@ class Orchestrator:
 
 
 def main() -> int:
+    global REPORT_PATH
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backup-id", default="", help="Empty starts a fresh backup first")
-    parser.add_argument("--report", default="smoke-result.json")
+    parser.add_argument(
+        "--report", default="smoke-result.json", help="JSON destination for success or failure"
+    )
     arguments = parser.parse_args()
+    REPORT_PATH = Path(arguments.report)
     required = [
         "SUBSCRIPTION_ID",
         "RESOURCE_GROUP",
@@ -442,7 +468,7 @@ def main() -> int:
     if backup_id is None:
         execution = flow.start(values["BACKUP_JOB_NAME"], backup, [], None)
         result["backup_execution"] = execution
-        flow.wait(values["BACKUP_JOB_NAME"], execution, 7500)
+        flow.wait(values["BACKUP_JOB_NAME"], execution, BACKUP_DEADLINE_SECONDS)
         completed = flow.completion(
             values["BACKUP_JOB_NAME"], execution, "backup", "backup.completed"
         )
@@ -454,7 +480,7 @@ def main() -> int:
         values["RESTORE_JOB_NAME"], restore, ["restore-test", "--plan"], backup_id
     )
     result["planning_execution"] = planning
-    flow.wait(values["RESTORE_JOB_NAME"], planning, 3600)
+    flow.wait(values["RESTORE_JOB_NAME"], planning, PLAN_DEADLINE_SECONDS)
     # Plan transport is finalized by the authenticated runtime implementation.
     plan = None
     for _ in range(12):
@@ -490,7 +516,7 @@ def main() -> int:
         values["RESTORE_JOB_NAME"], restore, ["restore-test", "--data-only"], backup_id, plan
     )
     result["restore_execution"] = execution
-    flow.wait(values["RESTORE_JOB_NAME"], execution, 7200)
+    flow.wait(values["RESTORE_JOB_NAME"], execution, DATA_DEADLINE_SECONDS)
     verified = flow.completion(
         values["RESTORE_JOB_NAME"],
         execution,
@@ -522,7 +548,7 @@ def main() -> int:
             "table_set_verified": True,
         }
     )
-    Path(arguments.report).write_text(json.dumps(result, indent=2) + "\n")
+    REPORT_PATH.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
     return 0
 
@@ -533,6 +559,9 @@ if __name__ == "__main__":
     except Exception as exc:
         # Never print unsanitized Azure errors, console logs, or private table plans.
         REPORT.update({"status": "failed", "error_type": type(exc).__name__})
-        Path("smoke-result.json").write_text(json.dumps(REPORT, indent=2) + "\n")
+        try:
+            REPORT_PATH.write_text(json.dumps(REPORT, indent=2) + "\n")
+        except OSError as report_error:
+            REPORT["error_type"] = type(report_error).__name__
         print(json.dumps(REPORT))
         raise SystemExit(1) from None
