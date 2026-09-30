@@ -525,7 +525,7 @@ module restoreAccount 'br/public:avm/res/document-db/database-account:0.21.1' = 
     enableBurstCapacity: false
     zoneRedundant: false
     disableLocalAuthentication: true
-    disableKeyBasedMetadataWriteAccess: false
+    disableKeyBasedMetadataWriteAccess: true
     minimumTlsVersion: 'Tls12'
     networkRestrictions: {
       ipRules: []
