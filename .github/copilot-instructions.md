@@ -39,6 +39,14 @@ Apply this workflow to GitHub Copilot and any other coding agent following these
 
 These rules cover assignment and linking within user-authorized issue work or PR creation, not blanket permission to publish branches, create PRs, change access, merge PRs, or close issues manually.
 
+## Acceptance checklist reconciliation after merge
+
+Follow [Updating issue acceptance after a pull request](../CONTRIBUTING.md#updating-issue-acceptance-after-a-pull-request) for every issue advanced by user-authorized work. Whenever a merge notification, post-merge check-in or resumed related work reveals a merged PR, automatically reconcile the **issue body's acceptance checklist** before reporting completion; do not wait for a reminder. Verify the live PR state, merge commit, target branch and validation evidence. This is mandatory for partial delivery using `Refs`, not only PRs that close an issue.
+
+Check only fully satisfied criteria; leave partial or unvalidated criteria unchecked with a concise linked progress/evidence note and remaining gates. Preserve criterion wording, unrelated content and other contributors' progress; reconcile current content before writing and avoid duplicate notes on repeated runs. Distinguish offline evidence, real-service validation and intermediate stacked-branch integration. Keep incomplete issues open. Read back the issue to verify the checklist, note and state; report exact blockers rather than silently skipping updates. Closure without merge, approval or passing CI is not evidence of delivery.
+
+If handing off an open PR, explicitly record acceptance reconciliation as pending for the next observed merge or resumed work. This policy does not provide continuous monitoring while the agent is inactive or authorize merging, deployments, access changes or unrelated issue edits.
+
 ## Changes and validation
 
 Make focused changes; preserve existing behavior and update directly related docs. Use pinned dependencies and the development commands in CONTRIBUTING. Run the smallest relevant existing tests and checks, and report exact commands/results and omissions. Never claim proposed settings or concurrency already exist. Benchmark with synthetic data and approved nonproduction resources; real Azure validation/deployment needs explicit authorization. Do not weaken encryption, verification, retry behavior, access boundaries, or acceptance gates for throughput.

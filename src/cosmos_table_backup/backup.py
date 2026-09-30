@@ -53,10 +53,7 @@ class BackupRunner:
         container_client: Any,
         crypto_client: Any,
         logger: SafeLogger,
-        *,
-        instrumentation_enabled: bool = True,
     ) -> None:
-        self._instrumentation_enabled = instrumentation_enabled
         self._config = config
         self._tables = table_service
         self._container = container_client
@@ -73,7 +70,7 @@ class BackupRunner:
         prefix = f"backups/{backup_id}"
         started = _now()
         run_clock = perf_counter()
-        total_metrics = StageMetrics(enabled=self._instrumentation_enabled)
+        total_metrics = StageMetrics()
         total_entities = 0
         total_bytes = 0
         self._log.emit("backup.started", backup_id=backup_id)
@@ -87,7 +84,7 @@ class BackupRunner:
             for index, table_name in enumerate(table_names):
                 table_started = _now()
                 table_clock = perf_counter()
-                metrics = StageMetrics(enabled=self._instrumentation_enabled)
+                metrics = StageMetrics()
                 object_name = f"{prefix}/tables/{index:08d}.enc"
                 writer = self._writer(object_name, metrics)
                 encryptor = ObjectEncryptor(
