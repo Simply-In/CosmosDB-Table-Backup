@@ -4,7 +4,7 @@ labels: [enhancement, 'status:needs-triage']
 body:
   - type: markdown
     attributes:
-      value: "Search existing issues first. Distinguish measured results from hypotheses. Use synthetic examples; never include entity data, credentials, keys, or unsanitized HTTP logs."
+      value: "Search existing issues first. Distinguish measured results from hypotheses. Never include entity data, credentials, keys, or unsanitized HTTP logs."
   - type: textarea
     id: problem
     attributes:
@@ -44,7 +44,7 @@ body:
     id: validation
     attributes:
       label: Validation
-      description: Tests, baseline comparisons, and nonproduction benchmark evidence required. State which tests have not been run.
+      description: Describe relevant regression tests and available evidence. Performance claims need measured comparisons. State which tests have not been run.
     validations:
       required: true
   - type: textarea
