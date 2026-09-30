@@ -1,0 +1,63 @@
+name: Feature or improvement
+description: Propose a bounded enhancement backed by evidence.
+labels: [enhancement, 'status:needs-triage']
+body:
+  - type: markdown
+    attributes:
+      value: "Search existing issues first. Distinguish measured results from hypotheses. Use synthetic examples; never include entity data, credentials, keys, or unsanitized HTTP logs."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and evidence
+      description: Cite the current code, operator need, or reproducible measurements.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected outcome
+      description: Describe the desired user-visible result without promising unmeasured performance gains.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed scope
+      description: Outline the approach, configuration behavior, and alternatives considered.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: State what this issue intentionally excludes.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Define observable completion requirements and resource bounds where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Tests, baseline comparisons, and nonproduction benchmark evidence required. State which tests have not been run.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and security
+      description: Consider wire format, encryption, restore verification, fail-closed behavior, safe telemetry, and disabled-mode compatibility.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and references
+      description: Use actual issue links. Separate hard prerequisites, related work, and official references; use None when absent.
+    validations:
+      required: true

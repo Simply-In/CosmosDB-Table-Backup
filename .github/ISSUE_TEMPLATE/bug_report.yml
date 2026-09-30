@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible correctness or reliability problem.
+labels: [bug, 'status:needs-triage']
+body:
+  - type: markdown
+    attributes:
+      value: "Search existing issues first. Do not include entity data, keys, credentials, connection strings, or unsanitized SDK HTTP logs. Do not publish exploit details in a public issue."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and evidence
+      description: Describe the defect and cite relevant code or sanitized observations.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide minimal steps using synthetic data, or explain why reproduction is not yet available.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Application commit/version, Python and SDK versions, relevant non-secret settings and workload size.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and scope
+      description: Affected operations, limitations, and any safe workaround. Maintainers assign priority by impact.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable requirements for a complete fix.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Regression tests and required nonproduction evidence; do not claim unperformed tests passed.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and security
+      description: Consider format, encryption, manifest-last, create-only writes, exclusion rules, and restore verification. Use N/A with a reason if unrelated.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and references
+      description: Distinguish blocked-by prerequisites from related work; use actual issue links, or None.
+    validations:
+      required: true

@@ -57,6 +57,7 @@ stateDiagram-v2
 
 | Goal | Guide |
 |---|---|
+| Contribute, report issues, label work, or prepare a pull request | [Contributing](CONTRIBUTING.md) |
 | Understand prerequisites, OIDC, environments, workflows, and first deployment | [Deployment and CI/CD](docs/deployment.md) |
 | Run, accept, monitor, troubleshoot, or clean up backup/restore operations | [Backup and restore runbooks](docs/operations.md) |
 | Understand the authoritative wire format, encryption, completion marker, and restore protocol | [Backup format v1](docs/backup-format.md) |
