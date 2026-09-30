@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.repository }}
+  group: backup-operations-${{ github.repository }}
   cancel-in-progress: false
 
 env:

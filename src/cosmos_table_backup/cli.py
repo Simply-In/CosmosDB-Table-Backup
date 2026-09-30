@@ -25,10 +25,10 @@ def _emit_failure(logger: SafeLogger, exc: Exception) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-    if list(argv) == ["restore-test"]:
+    if argv and argv[0] == "restore-test":
         from cosmos_table_backup.restore_cli import main as restore_main
 
-        return restore_main([])
+        return restore_main(argv[1:])
     if argv:
         print("usage: cosmos-table-backup [restore-test]", file=sys.stderr)
         return 2

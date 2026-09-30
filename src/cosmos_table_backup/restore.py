@@ -64,9 +64,13 @@ class VerificationReport:
     tables: tuple[TableVerification, ...]
     deterministic_hash: str
     status: str = "succeeded"
+    table_set_verified: bool = True
 
     def to_json(self) -> str:
-        return canonical_json(asdict(self)).decode("utf-8")
+        value = asdict(self)
+        if self.report_version == 1:
+            del value["table_set_verified"]
+        return canonical_json(value).decode("utf-8")
 
 
 class JsonLineDecoder:
@@ -103,16 +107,24 @@ class JsonLineDecoder:
 
 
 class EntityBatchWriter:
-    """Submit partition-safe upserts bounded by operation count and estimated wire bytes."""
+    """Submit partition-safe writes bounded by operation count and estimated wire bytes."""
 
     MAX_PAYLOAD_BYTES = 1_500_000
     BATCH_FRAMING_BYTES = 2048
     OPERATION_FRAMING_BYTES = 2048
 
-    def __init__(self, table_client: Any, batch_size: int, max_payload_bytes: int) -> None:
+    def __init__(
+        self,
+        table_client: Any,
+        batch_size: int,
+        max_payload_bytes: int,
+        *,
+        create_only: bool = False,
+    ) -> None:
         if not 0 < max_payload_bytes <= self.MAX_PAYLOAD_BYTES:
             raise RestoreError("transaction payload ceiling must be at most 1.5 MB")
         self._table = table_client
+        self._create_only = create_only
         self._limit = min(batch_size, 100)
         self._max_payload_bytes = max_payload_bytes
         self._partition: object | None = None
@@ -142,7 +154,10 @@ class EntityBatchWriter:
         ):
             self.flush()
         if self.BATCH_FRAMING_BYTES + estimated_bytes > self._max_payload_bytes:
-            self._table.upsert_entity(entity, mode=UpdateMode.REPLACE)
+            if self._create_only:
+                self._table.create_entity(entity)
+            else:
+                self._table.upsert_entity(entity, mode=UpdateMode.REPLACE)
         else:
             self._partition = partition
             self._entities.append(entity)
@@ -154,7 +169,11 @@ class EntityBatchWriter:
     def flush(self) -> None:
         if not self._entities:
             return
-        operations = [("upsert", entity, {"mode": UpdateMode.REPLACE}) for entity in self._entities]
+        operations = (
+            [("create", entity, {}) for entity in self._entities]
+            if self._create_only
+            else [("upsert", entity, {"mode": UpdateMode.REPLACE}) for entity in self._entities]
+        )
         self._table.submit_transaction(operations)
         self._entities.clear()
         self._payload_bytes = self.BATCH_FRAMING_BYTES
@@ -281,55 +300,138 @@ class RestoreRunner:
         self._crypto_factory = crypto_client_factory
         self._log = logger
 
+    def _authenticated_manifest(self) -> tuple[str, bytes, dict[str, Any], bytes]:
+        backup_id = self._config.backup_id
+        if backup_id is None:
+            backup_id = self._source.latest_successful_backup_id()
+        elif backup_id not in self._source.successful_backup_ids():
+            raise RestoreError("requested backup has no committed manifest")
+        prefix = f"backups/{backup_id}"
+        bootstrap_bytes, _ = self._source.read_limited(
+            f"{prefix}/bootstrap.json", self._config.max_manifest_bytes
+        )
+        bootstrap, wrapped_dek, manifest_nonce = _validate_bootstrap(
+            bootstrap_bytes, backup_id, self._config.expected_key_id
+        )
+        dek = unwrap_dek(self._crypto_factory(str(bootstrap["key_id"])), wrapped_dek)
+        encrypted_manifest, _ = self._source.read_limited(
+            f"{prefix}/manifest.enc", self._config.max_manifest_bytes
+        )
+        try:
+            manifest_bytes = decrypt_object(dek, encrypted_manifest, bootstrap_bytes)
+        except Exception as exc:
+            raise RestoreError("manifest authentication failed") from exc
+        if encrypted_manifest[5:17] != manifest_nonce:
+            raise RestoreError("manifest nonce does not match bootstrap")
+        return backup_id, dek, _validate_manifest(manifest_bytes, backup_id), manifest_bytes
+
+    def _plan(
+        self, backup_id: str, manifest: dict[str, Any], manifest_bytes: bytes
+    ) -> dict[str, Any]:
+        names = sorted(str(item["table_name"]) for item in manifest["tables"])
+        if len(names) > 100:
+            raise RestoreError("preparation plan exceeds the 100-table bound")
+        if any(
+            not 3 <= len(name) <= 63
+            or not name.isascii()
+            or not name[0].isalpha()
+            or not name.isalnum()
+            for name in names
+        ):
+            raise RestoreError("plan contains an invalid Azure Table name")
+        plan = {
+            "schema_version": 1,
+            "backup_id": backup_id,
+            "source_account_resource_id": self._config.source_account_resource_id,
+            "target_account_resource_id": self._config.target_account_resource_id,
+            "target_table_endpoint": self._config.target_table_endpoint,
+            "backup_storage_account_url": self._config.backup_storage_account_url,
+            "backup_container_name": self._config.backup_container_name,
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "table_names": names,
+        }
+        if len(canonical_json(plan)) > min(16 * 1024, self._config.max_manifest_bytes):
+            raise RestoreError("preparation plan exceeds the manifest byte bound")
+        return plan
+
+    def plan(self) -> str:
+        """Return private operator JSON; never enumerate or mutate target resources."""
+        backup_id, dek, manifest, manifest_bytes = self._authenticated_manifest()
+        plan = self._plan(backup_id, manifest, manifest_bytes)
+        for index, item in enumerate(manifest["tables"]):
+            self._authenticate_table(backup_id, f"backups/{backup_id}", index, item, dek)
+        return canonical_json(plan).decode("utf-8")
+
+    def _prepared_tables(self, plan: dict[str, Any]) -> dict[str, Any]:
+        assertion = self._config.preparation_json
+        if assertion is None:
+            raise RestoreError("data-only restore requires a governed preparation assertion")
+        if len(assertion.encode("utf-8")) > min(16 * 1024, self._config.max_manifest_bytes):
+            raise RestoreError("preparation assertion exceeds the manifest byte bound")
+        prepared = _parse_json(assertion.encode("utf-8"), "preparation assertion")
+        if canonical_json(prepared) != canonical_json(plan):
+            raise RestoreError("preparation assertion does not match authenticated backup binding")
+        tables: dict[str, Any] = {}
+        for name in plan["table_names"]:
+            client = self._target.get_table_client(name)
+            if (
+                next(iter(client.query_entities(query_filter="", results_per_page=1)), None)
+                is not None
+            ):
+                raise RestoreError("prepared target table is not empty")
+            tables[name] = client
+        return tables
+
     def run(self) -> VerificationReport:
         backup_id = self._config.backup_id
         try:
-            if backup_id is None:
-                backup_id = self._source.latest_successful_backup_id()
-            elif backup_id not in self._source.successful_backup_ids():
-                raise RestoreError("requested backup has no committed manifest")
-            prefix = f"backups/{backup_id}"
             self._log.emit("restore.started", backup_id=backup_id)
-            bootstrap_bytes, _ = self._source.read_limited(
-                f"{prefix}/bootstrap.json", self._config.max_manifest_bytes
-            )
-            bootstrap, wrapped_dek, manifest_nonce = _validate_bootstrap(
-                bootstrap_bytes, backup_id, self._config.expected_key_id
-            )
-            dek = unwrap_dek(self._crypto_factory(str(bootstrap["key_id"])), wrapped_dek)
-            encrypted_manifest, _ = self._source.read_limited(
-                f"{prefix}/manifest.enc", self._config.max_manifest_bytes
-            )
-            try:
-                manifest_bytes = decrypt_object(dek, encrypted_manifest, bootstrap_bytes)
-            except Exception as exc:
-                raise RestoreError("manifest authentication failed") from exc
-            if encrypted_manifest[5:17] != manifest_nonce:
-                raise RestoreError("manifest nonce does not match bootstrap")
-            manifest = _validate_manifest(manifest_bytes, backup_id)
+            backup_id, dek, manifest, manifest_bytes = self._authenticated_manifest()
+            prefix = f"backups/{backup_id}"
             expected_tables = {str(item["table_name"]) for item in manifest["tables"]}
-            self._remove_unexpected_tables(expected_tables)
+            prepared: dict[str, Any] = {}
+            snapshots: list[tuple[str, str, str, int]] = []
+            if self._config.data_only:
+                prepared = self._prepared_tables(self._plan(backup_id, manifest, manifest_bytes))
+                # Authenticate every table against pinned ETags before the first entity mutation.
+                for index, item in enumerate(manifest["tables"]):
+                    snapshots.append(self._authenticate_table(backup_id, prefix, index, item, dek))
+            else:
+                self._remove_unexpected_tables(expected_tables)
             reports: list[TableVerification] = []
             for index, item in enumerate(manifest["tables"]):
-                reports.append(self._restore_table(backup_id, prefix, index, item, dek))
-            self._remove_unexpected_tables(expected_tables)
-            if self._target_table_names() != expected_tables:
-                raise RestoreError("target table set does not exactly match manifest")
+                reports.append(
+                    self._restore_table(
+                        backup_id,
+                        prefix,
+                        index,
+                        item,
+                        dek,
+                        prepared.get(str(item["table_name"])),
+                        snapshots[index] if self._config.data_only else None,
+                    )
+                )
+            if not self._config.data_only:
+                self._remove_unexpected_tables(expected_tables)
+                if self._target_table_names() != expected_tables:
+                    raise RestoreError("target table set does not exactly match manifest")
             report = VerificationReport(
-                report_version=1,
+                report_version=2 if self._config.data_only else 1,
                 backup_id=backup_id,
                 target_endpoint=self._config.target_table_endpoint,
                 table_count=len(reports),
                 entity_count=sum(item.entity_count for item in reports),
                 tables=tuple(reports),
                 deterministic_hash=_report_hash(reports),
+                status="data_verified_pending_table_set" if self._config.data_only else "succeeded",
+                table_set_verified=not self._config.data_only,
             )
             self._log.emit(
-                "restore.completed",
+                "restore.data_verified" if self._config.data_only else "restore.completed",
                 backup_id=backup_id,
                 table_count=report.table_count,
                 entity_count=report.entity_count,
-                status="succeeded",
+                status=report.status,
             )
             return report
         except Exception as exc:
@@ -355,9 +457,9 @@ class RestoreRunner:
         if not self._target_table_names() <= expected_tables:
             raise RestoreError("unexpected target tables remain after cleanup")
 
-    def _restore_table(
+    def _authenticate_table(
         self, backup_id: str, prefix: str, index: int, item: Mapping[str, Any], dek: bytes
-    ) -> TableVerification:
+    ) -> tuple[str, str, str, int]:
         object_name = f"{prefix}/{item['object_name']}"
         etag = self._source.snapshot(object_name)
         aad = _object_aad(backup_id, "table", index)
@@ -370,14 +472,36 @@ class RestoreRunner:
             or byte_count != item.get("encrypted_byte_count")
         ):
             raise RestoreError("table object does not match manifest")
+        return etag, encrypted_hash, plaintext_hash, byte_count
+
+    def _restore_table(
+        self,
+        backup_id: str,
+        prefix: str,
+        index: int,
+        item: Mapping[str, Any],
+        dek: bytes,
+        table_client: Any = None,
+        snapshot: tuple[str, str, str, int] | None = None,
+    ) -> TableVerification:
+        object_name = f"{prefix}/{item['object_name']}"
+        aad = _object_aad(backup_id, "table", index)
+        etag, encrypted_hash, plaintext_hash, byte_count = snapshot or self._authenticate_table(
+            backup_id, prefix, index, item, dek
+        )
         table_name = str(item["table_name"])
-        with suppress(ResourceNotFoundError):
-            self._target.delete_table(table_name)
-        table_client = self._target.create_table(table_name)
+        if self._config.data_only:
+            if table_client is None or snapshot is None:
+                raise RestoreError("data-only table is not authenticated and prepared")
+        else:
+            with suppress(ResourceNotFoundError):
+                self._target.delete_table(table_name)
+            table_client = self._target.create_table(table_name)
         batcher = EntityBatchWriter(
             table_client,
             self._config.batch_size,
             self._config.max_batch_payload_bytes,
+            create_only=self._config.data_only,
         )
         decoder = JsonLineDecoder(
             self._config.max_record_bytes,

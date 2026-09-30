@@ -184,3 +184,21 @@ def test_json_lines_are_streamed_with_a_strict_bound() -> None:
     incomplete.write(b"partial")
     with pytest.raises(RestoreError):
         incomplete.finalize()
+
+
+def test_create_only_batch_and_oversized_single_use_real_sdk() -> None:
+    table = SdkTable()
+    table.client.create_entity = Mock(side_effect=RequestReachedTransport)  # type: ignore[method-assign]
+    table.create_entity = table.client.create_entity  # type: ignore[attr-defined]
+    writer = EntityBatchWriter(table, 2, 64 * 1024, create_only=True)
+    writer.add({"PartitionKey": "p", "RowKey": "r"})
+    writer.flush()
+    assert table.transport.body_lengths
+    single = Mock()
+    writer = EntityBatchWriter(single, 2, 6000, create_only=True)
+    oversized = {"PartitionKey": "p", "RowKey": "r", "value": "x" * 2000}
+    writer.add(oversized)
+    writer.flush()
+    single.create_entity.assert_called_once_with(oversized)
+    single.upsert_entity.assert_not_called()
+    single.submit_transaction.assert_not_called()
