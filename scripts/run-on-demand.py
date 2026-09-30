@@ -89,6 +89,10 @@ def log_messages(raw: str) -> list[str]:
         try:
             entry = json.loads(line)
         except ValueError:
+            # The pinned CLI can emit unescaped quotes inside its Log JSON string.
+            match = re.fullmatch(r'\{"TimeStamp":"[0-9TZ:+.\-]+","Log":"(.*)"\}', line)
+            if match:
+                messages.append(match.group(1))
             continue
         if isinstance(entry, dict):
             text = entry.get("Log", "")
