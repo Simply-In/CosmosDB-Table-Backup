@@ -135,10 +135,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if planning:
             for frame in plan_frames(runner.plan()):
                 print(frame)
+            from cosmos_table_backup.supervisor import collection_window
+
+            collection_window()
             return 0
         runner_started = True
         report = runner.run()
         print(report.to_json())
+        from cosmos_table_backup.supervisor import collection_window
+
+        collection_window()
         return 0
     except Exception as exc:
         if not runner_started:
