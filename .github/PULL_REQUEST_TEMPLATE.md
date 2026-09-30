@@ -18,7 +18,7 @@ reference in the final default-branch integration PR after full completion. -->
 
 <!-- List exact commands and results, or Not run with a reason.
 Performance changes need representative baseline comparisons, not assumed gains.
-Azure checks must use approved nonproduction resources and synthetic data. -->
+Azure checks require explicit authorization, approved nonproduction resources and non-sensitive data. -->
 
 ## Documentation and configuration
 
