@@ -252,15 +252,19 @@ def test_source_failure_interrupts_waiting_consumer_and_closes_client(phase: str
         if phase == "close":
             table.__aexit__.side_effect = RuntimeError("sensitive close error")
         source = AsyncEntitySource(service, "approved", 2, StageMetrics())
+
+        async def consume() -> None:
+            async with source:
+                if phase == "next_fetch":
+                    await anext(source)
+                    await asyncio.Event().wait()
+                else:
+                    async for _ in source:
+                        pass
+
         async with asyncio.timeout(5):
             with pytest.raises(ExceptionGroup) as raised:
-                async with source:
-                    if phase == "next_fetch":
-                        await anext(source)
-                        await asyncio.Event().wait()
-                    else:
-                        async for _ in source:
-                            pass
+                await consume()
         assert raised.value.subgroup(RuntimeError) is not None
         assert asyncio.all_tasks() == before
         assert source._queue.empty()
