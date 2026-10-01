@@ -109,7 +109,7 @@ These are identifiers, not credentials, but are intentionally kept out of reposi
 - **Deployment outputs inside `deployment.json`:** backup and restore identity IDs, persistent restore-test account ID, both job IDs, versioned backup key URI, source private-endpoint ID, and `sourceIntegrationParameters` containing the three values needed by source integration.
 - **Dependencies:** backup OIDC variables and the parameter file. A nonempty image must be `<ACR_LOGIN_SERVER>/cosmos-table-backup@sha256:<64 lowercase hex>`; a digest is required before either schedule or manual restore access can be enabled.
 
-The image resolver uses explicit input first, the live backup-job image second, and the disabled placeholder last. Consequently, an infrastructure-only deployment does not roll a released digest backward. The workflow resolves access as `enable_restore_access OR enable_restore_validation`, and scheduling as `enable_restore_validation`. Both what-if and apply use the same resolved values; invalid boolean inputs fail before Azure login. Use the access-only procedure in [Run an on-demand restore validation](operations.md#run-an-on-demand-restore-validation) for the required manual acceptance gate.
+The image resolver uses explicit input first, the live backup-job image second, and the disabled placeholder last. Consequently, an infrastructure-only deployment does not roll a released digest backward. The workflow resolves access as `enable_restore_access OR enable_restore_validation`, and scheduling as `enable_restore_validation`. Both what-if and apply use the same resolved values; invalid boolean inputs fail before Azure login. Use the access-only deployment followed by [governed on-demand backup and restore validation](operations.md#run-a-governed-on-demand-backup-and-restore-validation) for the required manual acceptance gate. Governed completion does not establish the legacy direct/monthly lifecycle feasibility required before enabling its schedule.
 
 ### `deploy-source-integration.yml` — Deploy source integration
 
@@ -177,7 +177,7 @@ sequenceDiagram
 6. Extract `sourceIntegrationParameters` from `backup-deployment-*`. Dispatch **Deploy source integration** with `apply=false`; review `source-what-if-*`, then rerun with identical values and `apply=true`.
 7. Validate source endpoint approval and private DNS from the workload network. Follow [Backup acceptance](operations.md#accept-backup-before-enabling-the-schedule).
 8. Only after acceptance, dispatch **Deploy backup platform** with `enable_schedule=true`, `enable_restore_validation=false`, `apply=false`; review the what-if, then apply.
-9. Keep restore access and monthly scheduling off until the separate [restore acceptance](operations.md#accept-restore-before-enabling-monthly-validation) succeeds.
+9. Keep restore access off during bootstrap. For [governed restore acceptance](operations.md#run-a-governed-on-demand-backup-and-restore-validation), review and apply a deployment with `enable_schedule=false`, `enable_restore_access=true`, and `enable_restore_validation=false`, then verify both jobs are Manual before dispatching the governed workflow. This temporarily disables the daily backup schedule enabled in step 8; after the acceptance window, restore its previously accepted setting through reviewed deployment. Keep monthly scheduling off; enabling it additionally requires [separate legacy lifecycle feasibility and operational approval](operations.md#accept-restore-before-enabling-monthly-validation).
 
 ## Change infrastructure without changing the image
 
@@ -200,7 +200,7 @@ Promotion is digest-only and updates backup and dormant restore together. Rollba
 ## End-to-end workflow procedures
 
 - **Backup E2E:** deploy with gates off → release image → deploy source integration → manually start and accept backup → guarded redeploy with daily schedule enabled. See [Run and accept backup](operations.md#run-an-on-demand-backup).
-- **Restore E2E:** keep monthly scheduling off → enable access only through reviewed workflow deployment with `enable_restore_access=true`, `enable_restore_validation=false` → start isolated restore and inspect its deterministic report → disable and explicitly remove conditional RBAC → only after approval use `enable_restore_validation=true` to establish monthly mode. See [Restore validation](operations.md#run-an-on-demand-restore-validation).
+- **Restore E2E:** review and apply workflow deployment with `enable_schedule=false`, `enable_restore_access=true`, `enable_restore_validation=false` → verify both jobs are Manual → dispatch `run-on-demand.yml` on `main` with an empty `backup_id` for fresh backup→restore, or a committed UUID for restore-only validation → require authenticated data verification, independent final ARM table-set verification, and a passed aggregate `smoke-result.json` → disable and explicitly remove conditional RBAC. See [Governed restore validation](operations.md#run-a-governed-on-demand-backup-and-restore-validation). Governed success does not prove legacy direct/monthly feasibility; only after a separate successful lifecycle test and approval may `enable_restore_validation=true` establish monthly mode.
 
 The workflow's `enable_restore_validation` is for the post-acceptance monthly state, not the first restore test.
 
@@ -213,7 +213,7 @@ The workflow's `enable_restore_validation` is for the post-acceptance monthly st
 5. Require branch protection, protected release tags, CODEOWNERS, CI, team reviewers, no self-review, and appropriate wait timers before delivery.
 6. Disable ACR public network access before production acceptance. GitHub-hosted runners currently need its development-stage public OIDC-authenticated publishing path; change `runs-on` to an approved private runner or private build service that can reach the ACR private endpoint.
 7. Keep ACR admin credentials, anonymous pull, storage shared keys, Cosmos local auth, and static Azure credentials disabled.
-8. Complete backup acceptance before daily scheduling and a separately approved isolated restore acceptance before restore access/monthly scheduling. Never point the validation restore at production.
+8. Complete backup acceptance before daily scheduling. Enable restore access only for separately approved governed isolated acceptance; keep monthly scheduling off until legacy lifecycle feasibility and operational approval are also established. Never point the validation restore at production.
 
 ## Local development and validation
 
