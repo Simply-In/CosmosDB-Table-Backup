@@ -122,8 +122,9 @@ def test_async_client_cleanup_preserves_failures(
     runner = Mock(run=AsyncMock(side_effect=failure))
     monkeypatch.setattr("cosmos_table_backup.cli.BackupRunner", Mock(return_value=runner))
     config = BackupConfig.from_env(ENV)
+    backup_run = _run_backup(config, Mock())
     with pytest.raises(type(failure)):
-        asyncio.run(_run_backup(config, Mock()))
+        asyncio.run(backup_run)
     for client in clients:
         client.__aexit__.assert_awaited_once()
 

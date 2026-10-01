@@ -34,7 +34,7 @@ from cosmos_table_backup.telemetry import SafeLogger
 
 
 class BackupError(RuntimeError):
-    """Raised when a run did not produce a completion marker."""
+    """Raised when backup completion was not confirmed."""
 
 
 def _now() -> str:

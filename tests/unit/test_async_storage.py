@@ -35,6 +35,26 @@ class ControlledBlob:
             self.active -= 1
 
 
+def test_cooperative_yields_follow_enqueued_blocks_not_buffered_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep = AsyncMock(wraps=asyncio.sleep)
+    monkeypatch.setattr("cosmos_table_backup.storage.asyncio.sleep", sleep)
+
+    async def scenario() -> None:
+        blob = AsyncMock()
+        async with AsyncBlockBlobWriter(blob, 4) as writer:
+            for count in range(1, 12):
+                await writer.write(b"x")
+                assert sleep.await_count == count // 4
+            assert writer.buffered_bytes == 3
+            await writer.commit()
+            assert sleep.await_count == blob.stage_block.await_count == 3
+        assert all(call.args == (0,) for call in sleep.await_args_list)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("concurrency,queue_blocks", [(1, 1), (2, 2), (8, 8)])
 def test_backpressure_concurrency_and_payload_bounds(concurrency: int, queue_blocks: int) -> None:
     async def scenario() -> None:
@@ -136,10 +156,15 @@ def test_stage_failure_cancels_siblings_and_prevents_commit(failure_at: str) -> 
         blob.stage_block = failing_stage
         writer = AsyncBlockBlobWriter(blob, 4, queue_blocks=1)
         before = asyncio.all_tasks()
-        with pytest.raises(ExceptionGroup, match="TaskGroup"):
-            async with asyncio.timeout(5), writer:
+
+        async def produce() -> None:
+            async with writer:
                 await writer.write(b"x" * (40 if failure_at == "queued" else 8))
                 await writer.commit()
+
+        async with asyncio.timeout(5):
+            with pytest.raises(ExceptionGroup, match="TaskGroup"):
+                await produce()
         blob.commit_block_list.assert_not_awaited()
         assert blob.active == 0
         assert blob.cancelled == 1
@@ -226,16 +251,22 @@ def test_empty_commit_failure_and_writer_validation() -> None:
         writer = AsyncBlockBlobWriter(blob, 4)
         with pytest.raises(StorageError):
             await writer.write(b"x")
-        with pytest.raises(ExceptionGroup) as error:
+
+        async def produce() -> None:
             async with writer:
                 with pytest.raises(StorageError):
                     await writer.__aenter__()
                 await writer.commit()
+
+        with pytest.raises(ExceptionGroup) as error:
+            await produce()
         assert isinstance(error.value.exceptions[0], StorageError)
+        assert str(error.value.exceptions[0]) == "create-only blob commit failed"
         blob.stage_block.assert_not_awaited()
         assert blob.commit_block_list.call_args.args[0] == []
 
     asyncio.run(scenario())
     for kwargs in ({"block_size": 0}, {"concurrency": 0}, {"queue_blocks": 9}):
+        blob = AsyncMock()
         with pytest.raises(StorageError):
-            AsyncBlockBlobWriter(AsyncMock(), **({"block_size": 4} | kwargs))
+            AsyncBlockBlobWriter(blob, **({"block_size": 4} | kwargs))

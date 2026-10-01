@@ -168,8 +168,6 @@ class AsyncBlockBlobWriter:
             view = view[take:]
             if len(self._buffer) == self._block_size:
                 await self._stage()
-        # Queue.put need not suspend when capacity is available.
-        await asyncio.sleep(0)
 
     async def _stage(self) -> None:
         if not self._buffer:
@@ -182,6 +180,8 @@ class AsyncBlockBlobWriter:
         self._blocks.append(BlobBlock(block_id=block_id))
         with self._metrics.time("upload_wait_ms"):
             await self._queue.put((block_id, payload))
+        # Queue.put need not suspend when capacity is available.
+        await asyncio.sleep(0)
 
     async def commit(self, *, content_type: str = "application/octet-stream") -> None:
         self._check_open()

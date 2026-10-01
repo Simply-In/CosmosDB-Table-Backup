@@ -100,7 +100,9 @@ The action group uses configured `alertEmails`; the nonproduction default is emp
 
 ### Bounded async upload settings
 
-Backup uses the pinned Azure async Table, Blob and Key Vault clients. Source pages and tables are processed sequentially, with no page prefetch; serialization, hashing and each object's AES-GCM stream remain single-producer operations. A bounded queue overlaps completed encrypted-block uploads with later entity processing and source page reads. All workers finish before the create-only object commit; `manifest.enc` remains last. SDK retries/backoff are unchanged. Async data-plane clients and their credential close only after worker cleanup; the synchronous Monitor credential has a separate lifecycle. Restore's synchronous SDK path is unchanged.
+Backup uses the pinned Azure async Table, Blob and Key Vault clients. Source pages and tables are processed sequentially, with no page prefetch; serialization, hashing and each object's AES-GCM stream remain single-producer operations. A bounded queue overlaps completed encrypted-block uploads with later entity processing and source page reads. All queued uploads finish before the create-only object commit; idle workers remain alive until writer context exit cancels and awaits them. `manifest.enc` remains last. SDK retries/backoff are unchanged. Async data-plane clients and their credential close only after worker cleanup; the synchronous Monitor credential has a separate lifecycle. Restore's synchronous SDK path is unchanged.
+
+Each complete-block enqueue yields cooperatively so workers can progress even when the queue has capacity. Writes that only append to the producer buffer do not force an event-loop turn per entity; source reads and queue backpressure remain async cancellation boundaries.
 
 | Environment setting | Default | Accepted range |
 |---|---|---|
@@ -187,9 +189,9 @@ Both backups authenticated with the unchanged restore planner and produced match
 
 Filtered Azure Monitor data in the UTC 11:25–11:26 PT1M bucket reported maximum normalized RU of 98% and zero returned 429 requests. `ThrottledRequestPercentage` returned no series. Exact per-backup RU charges, complete throttling correlation and performance under induced backup throttling were not established; seeding retries are not backup evidence.
 
-The tested candidate source and both dependency manifests matched the worktree byte-for-byte. Candidate archive SHA-256: `576ea9a394289f514d1bc963d034cab82df1facdf5f367f58b65f3e31b47da0d`.
+The tested candidate source and both dependency manifests matched the worktree byte-for-byte at comparison time and were subsequently committed as `9391bd30ddf6d320fb42d28d67fb6a6d4832dfb7`. Candidate archive SHA-256: `576ea9a394289f514d1bc963d034cab82df1facdf5f367f58b65f3e31b47da0d`. The later PR review follow-up restricts cooperative yields to complete-block enqueues; these Azure measurements predate that change and were not rerun.
 
-Local validation used Python 3.14.7, uv 0.12.19 and `PYTHONPATH=src`. `uv lock --check` passed. The commands below all use the prefix `uv run --frozen --no-sync --no-build`:
+Local validation for that measured candidate used Python 3.14.7, uv 0.12.19 and `PYTHONPATH=src`. `uv lock --check` passed. The commands below all use the prefix `uv run --frozen --no-sync --no-build`:
 
 | Command suffix | Result |
 |---|---|

@@ -233,8 +233,9 @@ def test_block_overflow_leaves_no_completion_marker(
         SafeLogger(raw_logger),
     )
 
+    backup_run = runner.run()
     with pytest.raises(BackupError) as error:
-        asyncio.run(runner.run())
+        asyncio.run(backup_run)
 
     cause = error.value.__cause__
     assert isinstance(cause, ExceptionGroup)
@@ -256,8 +257,9 @@ def test_any_read_failure_leaves_no_completion_marker() -> None:
     runner = BackupRunner(
         config(), Tables(fail_query=True), blobs, crypto(), SafeLogger(raw_logger)
     )
+    backup_run = runner.run()
     with pytest.raises(BackupError):
-        asyncio.run(runner.run())
+        asyncio.run(backup_run)
     assert not any(name.endswith("manifest.enc") for name in blobs.objects)
     assert not any(name.endswith("bootstrap.json") for name in blobs.objects)
     events = [call.args[0] for call in raw_logger.info.call_args_list]
@@ -284,8 +286,10 @@ def test_async_pipeline_failure_never_creates_completion_marker(
             Mock(side_effect=RuntimeError("failed")),
         )
     logger = Mock()
+    runner = BackupRunner(config(), tables, blobs, crypto(), SafeLogger(logger))
+    backup_run = runner.run()
     with pytest.raises(BackupError):
-        asyncio.run(BackupRunner(config(), tables, blobs, crypto(), SafeLogger(logger)).run())
+        asyncio.run(backup_run)
     assert not blobs.objects
     assert all(client.closed for client in tables.clients)
     assert all(not name.endswith("manifest.enc") for name in blobs.blobs)
