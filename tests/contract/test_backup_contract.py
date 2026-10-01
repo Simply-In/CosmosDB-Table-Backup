@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from unittest.mock import AsyncMock, Mock
 
@@ -11,6 +12,7 @@ from cryptography.exceptions import InvalidTag
 from cosmos_table_backup.backup import BackupError, BackupRunner, _object_aad
 from cosmos_table_backup.config import BackupConfig
 from cosmos_table_backup.encryption import canonical_json, decrypt_object
+from cosmos_table_backup.metrics import StageMetrics
 from cosmos_table_backup.storage import StorageError
 from cosmos_table_backup.telemetry import SafeLogger
 
@@ -182,9 +184,13 @@ def test_complete_backup_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         assert measurement["plaintext_bytes_per_second"] > 0
         assert measurement["digest_spill_count"] == 0
         assert measurement["digest_merge_ms"] >= 0
+        assert measurement["source_wait_ms"] >= 0
+        assert measurement["source_backpressure_ms"] >= 0
         assert "table_name" not in measurement
     assert completed["entity_count"] == 2
     assert completed["page_count"] == 4
+    for field in ("source_wait_ms", "source_backpressure_ms"):
+        assert completed[field] == sum(item[field] for item in table_metrics)
     assert completed["byte_count"] == sum(item["byte_count"] for item in table_metrics)
     assert completed["stage_block_bytes"] == sum(map(len, blobs.objects.values()))
     assert completed["stage_block_count"] == sum(kind == "stage" for kind, _ in blobs.events)
@@ -214,6 +220,38 @@ def test_telemetry_timing_does_not_change_backup_bytes(monkeypatch: pytest.Monke
         asyncio.run(BackupRunner(config(), Tables(), blobs, crypto(), SafeLogger(Mock())).run())
         results.append((blobs.objects, blobs.events))
     assert results[0] == results[1]
+
+
+def test_local_residual_subtracts_source_wait_not_overlapping_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def untimed(self, *args):  # type: ignore[no-untyped-def]
+        yield
+
+    original_writer = BackupRunner._writer
+
+    def writer(self, name, metrics):  # type: ignore[no-untyped-def]
+        if "/tables/" in name:
+            metrics.values.update(
+                page_fetch_ms=1000, source_wait_ms=7, upload_wait_ms=3, blob_commit_ms=2
+            )
+        return original_writer(self, name, metrics)
+
+    monkeypatch.setattr(StageMetrics, "time", untimed)
+    monkeypatch.setattr(BackupRunner, "_writer", writer)
+    monkeypatch.setattr(
+        "cosmos_table_backup.backup.perf_counter", Mock(side_effect=[0.0, 1.0, 1.1, 2.0])
+    )
+    tables = Tables()
+    tables.data = {"alpha": tables.data["alpha"]}
+    logger = Mock()
+    asyncio.run(BackupRunner(config(), tables, Container(), crypto(), SafeLogger(logger)).run())
+    records = [json.loads(call.args[0]) for call in logger.info.call_args_list]
+    table = next(record for record in records if record["event"] == "table_completed")
+    assert table["duration_ms"] == pytest.approx(100)
+    assert table["page_fetch_ms"] == 1000
+    assert table["local_processing_ms"] == pytest.approx(88)
 
 
 @pytest.mark.parametrize("block_size", [16, 32])
@@ -332,5 +370,76 @@ def test_async_backup_cancellation_closes_table_and_uploads(
         records = [json.loads(call.args[0]) for call in logger.info.call_args_list]
         assert records[-1]["event"] == "backup.failed"
         assert records[-1]["error_type"] == "CancelledError"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["source", "upload", "consumer", "cancel"])
+def test_prefetch_and_upload_failures_cancel_the_other_stage(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    async def scenario() -> None:
+        read_started = asyncio.Event()
+        read_stopped = asyncio.Event()
+        upload_started = asyncio.Event()
+        upload_stopped = asyncio.Event()
+        before = asyncio.all_tasks()
+
+        async def pages(self):  # type: ignore[no-untyped-def]
+            yield self._page(self.entities)
+            read_started.set()
+            try:
+                if failure == "source":
+                    await upload_started.wait()
+                    raise RuntimeError("sensitive read failure")
+                await asyncio.Event().wait()
+            finally:
+                read_stopped.set()
+
+        async def stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+            upload_started.set()
+            try:
+                if failure == "upload":
+                    raise RuntimeError("sensitive upload failure")
+                await asyncio.Event().wait()
+            finally:
+                upload_stopped.set()
+
+        monkeypatch.setattr(Paged, "by_page", pages)
+        monkeypatch.setattr(Blob, "stage_block", stage)
+        if failure == "consumer":
+            monkeypatch.setattr(
+                "cosmos_table_backup.backup.encode_entity",
+                Mock(side_effect=ValueError("sensitive serialization failure")),
+            )
+        tables = Tables()
+        tables.data = {"alpha": [{"PartitionKey": "p", "RowKey": "r", "value": "x" * 1024}]}
+        blobs = Container()
+        logger = Mock()
+        task = asyncio.create_task(
+            BackupRunner(config(), tables, blobs, crypto(), SafeLogger(logger)).run()
+        )
+        async with asyncio.timeout(5):
+            if failure == "cancel":
+                await read_started.wait()
+                await upload_started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(BackupError):
+                    await task
+        assert read_started.is_set()
+        assert read_stopped.is_set()
+        if failure != "consumer":
+            assert upload_started.is_set()
+            assert upload_stopped.is_set()
+        assert all(client.closed for client in tables.clients)
+        assert not blobs.objects
+        assert all(not name.endswith("manifest.enc") for name in blobs.blobs)
+        assert asyncio.all_tasks() == before
+        records = [json.loads(call.args[0]) for call in logger.info.call_args_list]
+        assert records[-1]["event"] == "backup.failed"
+        assert "sensitive" not in json.dumps(records)
 
     asyncio.run(scenario())

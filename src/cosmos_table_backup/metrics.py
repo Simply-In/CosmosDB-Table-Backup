@@ -15,6 +15,8 @@ METRIC_FIELDS = frozenset(
         "page_count",
         "page_fetch_ms",
         "page_fetch_max_ms",
+        "source_wait_ms",
+        "source_backpressure_ms",
         "stage_block_count",
         "stage_block_bytes",
         "stage_block_ms",

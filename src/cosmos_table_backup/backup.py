@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from contextlib import aclosing
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -12,7 +11,7 @@ from uuid import uuid4
 
 from cosmos_table_backup import __version__
 from cosmos_table_backup.config import BackupConfig
-from cosmos_table_backup.discovery import discover_tables_async, iter_entities_async
+from cosmos_table_backup.discovery import AsyncEntitySource, discover_tables_async
 from cosmos_table_backup.encryption import (
     AsyncObjectEncryptor,
     NonceFactory,
@@ -102,10 +101,8 @@ class BackupRunner:
                         OrderIndependentDigest(metrics=metrics) as keys_hash,
                         OrderIndependentDigest(metrics=metrics) as content_hash,
                     ):
-                        async with aclosing(
-                            iter_entities_async(
-                                self._tables, table_name, self._config.page_size, metrics
-                            )
+                        async with AsyncEntitySource(
+                            self._tables, table_name, self._config.page_size, metrics
                         ) as entities:
                             async for entity in entities:
                                 encoded = encode_entity(entity)
@@ -140,7 +137,7 @@ class BackupRunner:
                     max(
                         0.0,
                         duration_ms
-                        - metrics.values.get("page_fetch_ms", 0)
+                        - metrics.values.get("source_wait_ms", 0)
                         - metrics.values.get("upload_wait_ms", 0)
                         - metrics.values.get("blob_commit_ms", 0),
                     ),
