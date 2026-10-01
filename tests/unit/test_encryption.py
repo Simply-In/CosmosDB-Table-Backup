@@ -1,10 +1,12 @@
+import asyncio
 import json
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from cryptography.exceptions import InvalidTag
 
 from cosmos_table_backup.encryption import (
+    AsyncObjectEncryptor,
     CryptoError,
     NonceFactory,
     ObjectEncryptor,
@@ -14,6 +16,7 @@ from cosmos_table_backup.encryption import (
     make_bootstrap,
     unwrap_dek,
     wrap_dek_once,
+    wrap_dek_once_async,
 )
 
 
@@ -114,3 +117,35 @@ def test_nonce_factory_rejects_reuse_and_encryptor_lifecycle(
     encryptor.finalize()
     with pytest.raises(CryptoError):
         encryptor.write(b"x")
+
+
+@pytest.mark.parametrize("chunks", [[], [b"cosmos-", b"table-backup\n"], [b"x" * 10000]])
+def test_async_encryption_is_exactly_v1_and_bounded(chunks: list[bytes]) -> None:
+    async def scenario() -> None:
+        sink = Sink()
+        reference = ObjectEncryptor(b"k" * 32, b"n" * 12, b"aad", sink)
+        for chunk in chunks:
+            reference.write(chunk)
+        expected = reference.finalize()
+        async_sink = AsyncMock()
+        encryptor = AsyncObjectEncryptor(b"k" * 32, b"n" * 12, b"aad", async_sink)
+        for chunk in chunks:
+            await encryptor.write(chunk)
+            assert encryptor._pending.chunks == []
+        assert await encryptor.finalize() == expected
+        encoded = b"".join(call.args[0] for call in async_sink.write.await_args_list)
+        assert encoded == bytes(sink.data)
+        assert decrypt_object(b"k" * 32, encoded, b"aad") == b"".join(chunks)
+        with pytest.raises(CryptoError):
+            await encryptor.finalize()
+        with pytest.raises(CryptoError):
+            await encryptor.write(b"x")
+        client = AsyncMock()
+        client.wrap_key.return_value.encrypted_key = b"wrapped"
+        assert await wrap_dek_once_async(client, b"k" * 32) == b"wrapped"
+        client.wrap_key.assert_awaited_once()
+        client.wrap_key.return_value.encrypted_key = b""
+        with pytest.raises(CryptoError):
+            await wrap_dek_once_async(client, b"k" * 32)
+
+    asyncio.run(scenario())

@@ -19,25 +19,9 @@ from cosmos_table_backup.restore import RestoreRunner
 from cosmos_table_backup.restore_config import RestoreConfig
 from cosmos_table_backup.restore_storage import AzureRestoreSource
 from cosmos_table_backup.telemetry import SafeLogger, configure_logging, configure_monitor_export
+from cosmos_table_backup.telemetry import silence_sdk_logging as _silence_sdk_logging
 
 _RESTORE_FAILED_EVENT = "restore.failed"
-
-
-def _silence_sdk_logging() -> None:
-    # SDK HTTP logs are not an allowlisted telemetry channel, even at INFO.
-    for name in (
-        "azure",
-        "azure.core.pipeline.policies.http_logging_policy",
-        "azure.data.tables",
-        "azure.storage.blob",
-        "azure.identity",
-        "azure.keyvault",
-    ):
-        logging.getLogger(name).setLevel(logging.CRITICAL + 1)
-    for name, logger in logging.Logger.manager.loggerDict.items():
-        if name.startswith("azure.") and isinstance(logger, logging.Logger):
-            logger.setLevel(logging.CRITICAL + 1)
-            logger.disabled = True
 
 
 def _private_plan_logger() -> SafeLogger:

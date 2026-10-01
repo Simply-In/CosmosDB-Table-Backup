@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from contextlib import aclosing
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -10,14 +12,14 @@ from uuid import uuid4
 
 from cosmos_table_backup import __version__
 from cosmos_table_backup.config import BackupConfig
-from cosmos_table_backup.discovery import discover_tables, iter_entities
+from cosmos_table_backup.discovery import discover_tables_async, iter_entities_async
 from cosmos_table_backup.encryption import (
+    AsyncObjectEncryptor,
     NonceFactory,
-    ObjectEncryptor,
     canonical_json,
     generate_dek,
     make_bootstrap,
-    wrap_dek_once,
+    wrap_dek_once_async,
 )
 from cosmos_table_backup.manifest import BackupManifest, TableManifest
 from cosmos_table_backup.metrics import StageMetrics
@@ -27,12 +29,12 @@ from cosmos_table_backup.serialization import (
     encode_entity_content,
     encode_entity_key,
 )
-from cosmos_table_backup.storage import BlockBlobWriter
+from cosmos_table_backup.storage import AsyncBlockBlobWriter
 from cosmos_table_backup.telemetry import SafeLogger
 
 
 class BackupError(RuntimeError):
-    """Raised when a run did not produce a completion marker."""
+    """Raised when backup completion was not confirmed."""
 
 
 def _now() -> str:
@@ -60,12 +62,16 @@ class BackupRunner:
         self._crypto = crypto_client
         self._log = logger
 
-    def _writer(self, object_name: str, metrics: StageMetrics) -> BlockBlobWriter:
-        return BlockBlobWriter(
-            self._container.get_blob_client(object_name), self._config.block_size, metrics
+    def _writer(self, object_name: str, metrics: StageMetrics) -> AsyncBlockBlobWriter:
+        return AsyncBlockBlobWriter(
+            self._container.get_blob_client(object_name),
+            self._config.block_size,
+            metrics,
+            concurrency=self._config.upload_concurrency,
+            queue_blocks=self._config.upload_queue_blocks,
         )
 
-    def run(self) -> str:
+    async def run(self) -> str:
         backup_id = str(uuid4())
         prefix = f"backups/{backup_id}"
         started = _now()
@@ -75,9 +81,9 @@ class BackupRunner:
         total_bytes = 0
         self._log.emit("backup.started", backup_id=backup_id)
         try:
-            table_names = discover_tables(self._tables, self._config.excluded_tables)
+            table_names = await discover_tables_async(self._tables, self._config.excluded_tables)
             dek = generate_dek()
-            wrapped_dek = wrap_dek_once(self._crypto, dek)
+            wrapped_dek = await wrap_dek_once_async(self._crypto, dek)
             nonces = NonceFactory()
             manifest_nonce = nonces.generate()
             table_results: list[TableManifest] = []
@@ -86,42 +92,48 @@ class BackupRunner:
                 table_clock = perf_counter()
                 metrics = StageMetrics()
                 object_name = f"{prefix}/tables/{index:08d}.enc"
-                writer = self._writer(object_name, metrics)
-                encryptor = ObjectEncryptor(
-                    dek, nonces.generate(), _object_aad(backup_id, "table", index), writer
-                )
                 entity_count = 0
                 plaintext_hash = hashlib.sha256()
-                with (
-                    OrderIndependentDigest(metrics=metrics) as keys_hash,
-                    OrderIndependentDigest(metrics=metrics) as content_hash,
-                ):
-                    for entity in iter_entities(
-                        self._tables, table_name, self._config.page_size, metrics
-                    ):
-                        encoded = encode_entity(entity)
-                        metrics.add("plaintext_byte_count", len(encoded))
-                        encryptor.write(encoded)
-                        plaintext_hash.update(encoded)
-                        keys_hash.update(encode_entity_key(entity))
-                        content_hash.update(encode_entity_content(entity))
-                        entity_count += 1
-                    result = encryptor.finalize()
-                    writer.commit()
-                    table_results.append(
-                        TableManifest(
-                            table_name=table_name,
-                            object_name=f"tables/{index:08d}.enc",
-                            entity_count=entity_count,
-                            encrypted_byte_count=result.byte_count,
-                            encrypted_sha256=result.sha256,
-                            plaintext_sha256=plaintext_hash.hexdigest(),
-                            keys_sha256=keys_hash.hexdigest(),
-                            entity_content_sha256=content_hash.hexdigest(),
-                            started_at=table_started,
-                            completed_at=_now(),
-                        )
+                async with self._writer(object_name, metrics) as writer:
+                    encryptor = AsyncObjectEncryptor(
+                        dek, nonces.generate(), _object_aad(backup_id, "table", index), writer
                     )
+                    with (
+                        OrderIndependentDigest(metrics=metrics) as keys_hash,
+                        OrderIndependentDigest(metrics=metrics) as content_hash,
+                    ):
+                        async with aclosing(
+                            iter_entities_async(
+                                self._tables, table_name, self._config.page_size, metrics
+                            )
+                        ) as entities:
+                            async for entity in entities:
+                                encoded = encode_entity(entity)
+                                metrics.add("plaintext_byte_count", len(encoded))
+                                await encryptor.write(encoded)
+                                plaintext_hash.update(encoded)
+                                keys_hash.update(encode_entity_key(entity))
+                                content_hash.update(encode_entity_content(entity))
+                                entity_count += 1
+                        result = await encryptor.finalize()
+                        # Finish required local work before committing this table.
+                        keys_digest = keys_hash.hexdigest()
+                        content_digest = content_hash.hexdigest()
+                        await writer.commit()
+                        table_results.append(
+                            TableManifest(
+                                table_name=table_name,
+                                object_name=f"tables/{index:08d}.enc",
+                                entity_count=entity_count,
+                                encrypted_byte_count=result.byte_count,
+                                encrypted_sha256=result.sha256,
+                                plaintext_sha256=plaintext_hash.hexdigest(),
+                                keys_sha256=keys_digest,
+                                entity_content_sha256=content_digest,
+                                started_at=table_started,
+                                completed_at=_now(),
+                            )
+                        )
                 duration_ms = (perf_counter() - table_clock) * 1000
                 metrics.add(
                     "local_processing_ms",
@@ -129,7 +141,7 @@ class BackupRunner:
                         0.0,
                         duration_ms
                         - metrics.values.get("page_fetch_ms", 0)
-                        - metrics.values.get("stage_block_ms", 0)
+                        - metrics.values.get("upload_wait_ms", 0)
                         - metrics.values.get("blob_commit_ms", 0),
                     ),
                 )
@@ -151,9 +163,9 @@ class BackupRunner:
                 )
             bootstrap = make_bootstrap(backup_id, self._config.key_id, wrapped_dek, manifest_nonce)
             bootstrap_bytes = canonical_json(bootstrap)
-            bootstrap_writer = self._writer(f"{prefix}/bootstrap.json", total_metrics)
-            bootstrap_writer.write(bootstrap_bytes)
-            bootstrap_writer.commit(content_type="application/json")
+            async with self._writer(f"{prefix}/bootstrap.json", total_metrics) as bootstrap_writer:
+                await bootstrap_writer.write(bootstrap_bytes)
+                await bootstrap_writer.commit(content_type="application/json")
             manifest = BackupManifest(
                 backup_id=backup_id,
                 application_version=__version__,
@@ -163,13 +175,13 @@ class BackupRunner:
                 completed_at=_now(),
                 tables=tuple(table_results),
             )
-            manifest_writer = self._writer(f"{prefix}/manifest.enc", total_metrics)
-            manifest_encryptor = ObjectEncryptor(
-                dek, manifest_nonce, bootstrap_bytes, manifest_writer
-            )
-            manifest_encryptor.write(manifest.to_bytes())
-            manifest_encryptor.finalize()
-            manifest_writer.commit()
+            async with self._writer(f"{prefix}/manifest.enc", total_metrics) as manifest_writer:
+                manifest_encryptor = AsyncObjectEncryptor(
+                    dek, manifest_nonce, bootstrap_bytes, manifest_writer
+                )
+                await manifest_encryptor.write(manifest.to_bytes())
+                await manifest_encryptor.finalize()
+                await manifest_writer.commit()
             self._log.emit(
                 "backup.completed",
                 backup_id=backup_id,
@@ -180,7 +192,7 @@ class BackupRunner:
                 ),
             )
             return backup_id
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             elapsed_seconds = perf_counter() - run_clock
             self._log.emit(
                 "backup.failed",
@@ -189,4 +201,6 @@ class BackupRunner:
                 error_type=type(exc).__name__,
                 duration_ms=elapsed_seconds * 1000,
             )
-            raise BackupError("backup failed; no valid completion marker was created") from exc
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise BackupError("backup failed; completion was not confirmed") from exc

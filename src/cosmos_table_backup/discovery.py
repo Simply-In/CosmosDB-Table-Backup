@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Collection, Iterable, Iterator, Mapping
 from typing import Any, Protocol
 
 from cosmos_table_backup.metrics import StageMetrics
@@ -56,3 +56,37 @@ def iter_entities(
             return
         metrics.add("page_count", 1)
         yield from page
+
+
+async def discover_tables_async(
+    service: Any, excluded_tables: Collection[str] = EXCLUDED_TABLES
+) -> list[str]:
+    exclusions = frozenset(excluded_tables) | EXCLUDED_TABLES
+    try:
+        names = [
+            str(item.name if hasattr(item, "name") else item["name"])
+            async for item in service.list_tables()
+        ]
+    except Exception as exc:
+        raise DiscoveryError("table discovery failed") from exc
+    included = sorted(name for name in names if name not in exclusions)
+    if not included:
+        raise DiscoveryError("no included tables were discovered")
+    return included
+
+
+async def iter_entities_async(
+    service: Any, table_name: str, page_size: int, metrics: StageMetrics
+) -> AsyncGenerator[Mapping[str, Any]]:
+    """Advance exactly one async SDK page at a time, without prefetch."""
+    async with service.get_table_client(table_name) as table:
+        pages = table.query_entities(query_filter="", results_per_page=page_size).by_page()
+        while True:
+            try:
+                with metrics.time("page_fetch_ms", "page_fetch_max_ms"):
+                    page = await anext(pages)
+            except StopAsyncIteration:
+                return
+            metrics.add("page_count", 1)
+            async for entity in page:
+                yield entity

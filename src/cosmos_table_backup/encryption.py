@@ -26,6 +26,18 @@ class ChunkSink(Protocol):
     def write(self, data: bytes) -> None: ...
 
 
+class AsyncChunkSink(Protocol):
+    async def write(self, data: bytes) -> None: ...
+
+
+class _PendingChunks:
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self.chunks.append(data)
+
+
 @dataclass(frozen=True, slots=True)
 class EncryptionResult:
     nonce: bytes
@@ -85,6 +97,31 @@ class ObjectEncryptor:
         self._emit(self._ctx.tag)
         self._closed = True
         return EncryptionResult(self._nonce, self._hash.hexdigest(), self._count)
+
+
+class AsyncObjectEncryptor:
+    """Reuse the v1 encryptor with at most one producer call pending at a time."""
+
+    def __init__(self, dek: bytes, nonce: bytes, aad: bytes, sink: AsyncChunkSink) -> None:
+        self._pending = _PendingChunks()
+        self._encryptor = ObjectEncryptor(dek, nonce, aad, self._pending)
+        self._sink = sink
+
+    async def _drain(self) -> None:
+        while self._pending.chunks:
+            chunk = self._pending.chunks.pop(0)
+            await self._sink.write(chunk)
+
+    async def write(self, plaintext: bytes) -> None:
+        await self._drain()
+        self._encryptor.write(plaintext)
+        await self._drain()
+
+    async def finalize(self) -> EncryptionResult:
+        await self._drain()
+        result = self._encryptor.finalize()
+        await self._drain()
+        return result
 
 
 def decrypt_object(dek: bytes, encoded: bytes, aad: bytes) -> bytes:
@@ -173,6 +210,15 @@ def generate_dek() -> bytes:
 
 def wrap_dek_once(crypto_client: Any, dek: bytes) -> bytes:
     result = crypto_client.wrap_key(KeyWrapAlgorithm.rsa_oaep_256, dek)
+    return _wrapped_key(result)
+
+
+async def wrap_dek_once_async(crypto_client: Any, dek: bytes) -> bytes:
+    result = await crypto_client.wrap_key(KeyWrapAlgorithm.rsa_oaep_256, dek)
+    return _wrapped_key(result)
+
+
+def _wrapped_key(result: Any) -> bytes:
     wrapped = bytes(result.encrypted_key)
     if not wrapped:
         raise CryptoError("Key Vault returned an empty wrapped key")
