@@ -30,7 +30,7 @@ Choose a [bug report](.github/ISSUE_TEMPLATE/bug_report.yml), [feature/improveme
 - State the expected outcome, bounded scope, non-goals, measurable acceptance criteria, tests/evidence, compatibility/security constraints, and dependencies.
 - Bugs need reproduction, environment, expected/actual behavior, and impact. If a reproduction is unavailable, explain the evidence and remaining uncertainty.
 - Performance claims need measured evidence and workload context (entity sizes/counts, page/block settings, partition distribution), elapsed time/throughput, RU/throttling and memory/scratch bounds where available. Never promise gains based only on asynchronous architecture. Historical test results are observations, not performance guarantees.
-- Check supported Azure SDK APIs and service limits against official documentation. SQL API examples do not establish Cosmos DB for Table behavior. Gate uncertain request-charge/paging/retry behavior behind explicit real-service validation.
+- Check supported Azure SDK APIs and service limits against official documentation. SQL API examples do not establish Cosmos DB for Table behavior. Gate uncertain paging/retry behavior behind explicit real-service validation.
 
 Never include entity keys/values, tokens, SAS strings, connection strings, plaintext/wrapped encryption keys, or unsanitized SDK HTTP traces. Real-service validation requires explicitly approved nonproduction resources and non-sensitive data; do not create cloud resources or run costly tests without authorization. The completed synthetic experiments are retired, and repeating them is not currently planned. Do not recreate their code, tests, infrastructure or procedures without a new explicit user request. Do not publish exploit details publicly. No private disclosure contact is currently configured by this repository; use an established private maintainer channel if available rather than inventing one.
 
@@ -106,7 +106,6 @@ Assign at least one area to triaged issues and PRs; more than one is allowed whe
 | `area:developer-experience` | Contribution guidance, templates, labels and repository tooling |
 | `performance` | Throughput, latency, CPU, memory or scratch I/O |
 | `observability` | Safe metrics, diagnostics, benchmarks and evidence |
-| `ru-budget` | Cosmos Table charge accounting and optional backup RU control |
 
 ### Triage, community and resolution
 
@@ -132,7 +131,6 @@ Examples:
 
 - Backup baseline: `enhancement`, `priority:p1`, `area:backup`, `performance`, `observability`.
 - Blob limit defect: `bug`, `priority:p1`, `area:storage`, `area:backup`.
-- RU integration awaiting accounting/pipeline work: `enhancement`, `priority:p2`, `area:backup`, `ru-budget`, `status:blocked`, with actual prerequisite links.
 - Contribution documentation: `documentation`, `area:developer-experience`; optionally one PR priority.
 
 ### Non-destructive catalog synchronization
