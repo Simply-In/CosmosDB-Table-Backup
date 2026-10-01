@@ -151,7 +151,7 @@ Dedicated Azure test resources, identity grants, images, DNS and deployment reco
 | No `manifest.enc` | Treat the run as failed. Preserve partial blobs for investigation; lifecycle management handles them later. Never restore the prefix. |
 | Cosmos 401/403 | Check the source Table data-plane reader assignment and managed-identity audience. Do not enable keys. |
 | Name resolution/connectivity | Check private endpoint approval, private DNS links, NSG/platform dependencies, and the source endpoint. Do not enable public access as a workaround. |
-| Cosmos 429 | Reduce configured page size/concurrency or move the schedule; stay inside the accepted RU budget. |
+| Cosmos 429 | Review source capacity and Azure Monitor throttling; move the schedule to reduce overlap with other workloads. Preserve SDK retries and retry-after behavior. Page-size effects on throttling are unmeasured; smaller pages can increase request count. |
 | Key wrap failure | Confirm the exact versioned HSM key is enabled and the backup identity has metadata/wrap only. |
 | Blob conflict | Use a new run ID. Never overwrite an immutable object. |
 

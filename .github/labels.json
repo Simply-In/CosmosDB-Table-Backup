@@ -19,7 +19,6 @@
   {"name":"priority:p3","color":"c2e0c6","description":"Low-impact polish or deferred work"},
   {"name":"performance","color":"5319e7","description":"Throughput, latency, CPU, memory, or scratch-I/O improvement"},
   {"name":"observability","color":"1d76db","description":"Safe metrics, diagnostics, benchmarks, or operational evidence"},
-  {"name":"ru-budget","color":"006b75","description":"Cosmos Table request-charge accounting or optional RU workload control"},
   {"name":"area:backup","color":"bfd4f2","description":"Backup discovery, streaming, orchestration, and completion"},
   {"name":"area:restore","color":"bfd4f2","description":"Isolated restore and recoverability verification"},
   {"name":"area:storage","color":"bfd4f2","description":"Blob streaming, block staging, commit, and object limits"},
