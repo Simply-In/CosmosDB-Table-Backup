@@ -38,6 +38,8 @@ class BackupConfig:
     application_insights_authentication_string: str = ""
     page_size: int = 500
     block_size: int = 4 * 1024 * 1024
+    upload_concurrency: int = 2
+    upload_queue_blocks: int = 2
     log_level: str = "INFO"
 
     @classmethod
@@ -46,12 +48,18 @@ class BackupConfig:
         try:
             page_size = int(values.get("BACKUP_PAGE_SIZE", "500"))
             block_size = int(values.get("BACKUP_BLOCK_SIZE", str(4 * 1024 * 1024)))
+            upload_concurrency = int(values.get("BACKUP_UPLOAD_CONCURRENCY", "2"))
+            upload_queue_blocks = int(values.get("BACKUP_UPLOAD_QUEUE_BLOCKS", "2"))
         except ValueError as exc:
-            raise ConfigurationError("page and block sizes must be integers") from exc
+            raise ConfigurationError("page, block and upload settings must be integers") from exc
         if not 1 <= page_size <= 1000:
             raise ConfigurationError("BACKUP_PAGE_SIZE must be between 1 and 1000")
         if not 64 * 1024 <= block_size <= 100 * 1024 * 1024:
             raise ConfigurationError("BACKUP_BLOCK_SIZE must be between 64 KiB and 100 MiB")
+        if not 1 <= upload_concurrency <= 8:
+            raise ConfigurationError("BACKUP_UPLOAD_CONCURRENCY must be between 1 and 8")
+        if not 1 <= upload_queue_blocks <= 8:
+            raise ConfigurationError("BACKUP_UPLOAD_QUEUE_BLOCKS must be between 1 and 8")
         table_endpoint = _https_url(
             _required(values, "COSMOS_TABLE_ENDPOINT"), "COSMOS_TABLE_ENDPOINT"
         )
@@ -100,5 +108,7 @@ class BackupConfig:
             application_insights_authentication_string=insights_authentication,
             page_size=page_size,
             block_size=block_size,
+            upload_concurrency=upload_concurrency,
+            upload_queue_blocks=upload_queue_blocks,
             log_level=values.get("LOG_LEVEL", "INFO").upper(),
         )

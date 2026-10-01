@@ -98,6 +98,27 @@ The platform creates these always-enabled scheduled-query alerts:
 
 The action group uses configured `alertEmails`; the nonproduction default is empty, so alerts exist without email recipients. Validate alert queries against actual `AppTraces` ingestion before enabling the schedule. Application telemetry is allowlisted: event, run ID, numeric table index/count, numeric measurements, status, and sanitized exception type. Table names, object paths, entity keys/values, plaintext/wrapped keys, access tokens, SAS tokens, and connection strings are not telemetry fields. Do not enable unsanitized Azure SDK HTTP logging.
 
+### Bounded async upload settings
+
+Backup uses the pinned Azure async Table, Blob and Key Vault clients. Source pages and tables are processed sequentially, with no page prefetch; serialization, hashing and each object's AES-GCM stream remain single-producer operations. A bounded queue overlaps completed encrypted-block uploads with later entity processing and source page reads. All workers finish before the create-only object commit; `manifest.enc` remains last. SDK retries/backoff are unchanged. Async data-plane clients and their credential close only after worker cleanup; the synchronous Monitor credential has a separate lifecycle. Restore's synchronous SDK path is unchanged.
+
+| Environment setting | Default | Accepted range |
+|---|---|---|
+| `BACKUP_UPLOAD_CONCURRENCY` | `2` | `1`–`8` active uploads per object |
+| `BACKUP_UPLOAD_QUEUE_BLOCKS` | `2` | `1`–`8` waiting complete blocks |
+| `BACKUP_BLOCK_SIZE` | `4194304` (4 MiB) | 64 KiB–100 MiB |
+| `BACKUP_PAGE_SIZE` | `500` | `1`–`1000` entities per source page |
+
+Invalid settings fail configuration before data-plane access. Defaults apply when settings are omitted; deployments may supply explicit environment values. Concurrency `1` still overlaps production with upload and is **not** the old inline-staging baseline.
+
+**Memory accounting:** let B be block size, Q queue capacity and C upload concurrency. At most Q queued immutable blocks, C worker-held blocks, one pending producer block and one producer assembly buffer are live. Conversion briefly retains both the assembly buffer and its immutable copy; Python bytearray growth can exceed its logical length. `(Q + C + 3) × B` is a conservative application-owned block-payload allocation budget at supported block sizes, including that growth/copy overlap. Workers release their last payload before waiting for another block, and no task is created per block.
+
+The pinned Blob helper uses an exact-length bytes slice (no new payload for a full bytes slice); its async HTTP transport and aiohttp bytes payload reuse that immutable request body. Retries reuse it rather than queueing additional requests. Socket/TLS writes can retain additional native copies: budget a further `3 × C × B` for transport/TLS payload working space, giving a conservative upload planning allowance of `(Q + 4C + 3) × B` (52 MiB at defaults). This is **not** a hard process-RSS ceiling or a guarantee about native allocator/kernel buffers.
+
+Total working memory also includes the current materialized SDK page and response/conversion buffers, current entity/JSON/encoded plaintext and ciphertext (including transient serialization/encryption copies), manifest/bootstrap serialization, two fixed-size digest sort buffers and bounded merge readers, at most 50,000 block-ID descriptors/commit XML, client/telemetry state and Python/native allocator overhead. These terms depend on configured page size, maximum entity/encoded-record size, table count, digest settings and transport implementation, not accumulated entity count. Page count is a bound on entities, not bytes; increasing page or block settings requires including these separate terms in the job's memory limit and measuring RSS. Digest scratch still scales with entity count and uses the documented bounded merge fan-in; upload staging adds no scratch files.
+
+On producer/upload failure or async cancellation, the writer cancels and awaits its workers, discards queued payloads and never attempts that table commit or a later manifest. Already staged uncommitted blocks may remain. Cancellation during a server commit can leave its acceptance unknown; do not infer marker absence from a lost response or retry by overwriting. CPU serialization/digest work is cooperative, not forcibly preemptible; cancellation takes effect at async boundaries. No speedup is implied by these settings.
+
 ### Interpret stage-level backup telemetry
 
 `table_completed` adds one numeric summary per successful table; `backup.completed` adds the aggregate only after the create-only manifest commit. Existing entity/byte counters and event names remain unchanged. `backup.failed` includes elapsed time and sanitized exception type, not an exception message or partial success summary. A completed table does not imply a completed backup.
@@ -112,16 +133,17 @@ All durations are monotonic elapsed milliseconds, not CPU time. Rates use bytes/
 | `entity_count`, `byte_count`, `plaintext_byte_count` | Table entity count, encrypted table-object bytes (including 33-byte framing), and encoded entity bytes. Run totals sum table payloads only, excluding bootstrap/manifest bytes. |
 | `plaintext_bytes_per_second`, `encrypted_bytes_per_second` | Respective table payload totals divided by the table/run duration. |
 | `page_count`, `page_fetch_ms`, `page_fetch_max_ms` | Successful logical SDK page advances (including empty pages), summed advance time, and maximum advance time. The terminal iterator probe contributes time but no count. |
-| `stage_block_count`, `stage_block_bytes`, `stage_block_ms`, `stage_block_max_ms` | Successful staged-block count/bytes, summed SDK staging time, and maximum staging time. Run totals include bootstrap/manifest staging as well as table data. |
+| `stage_block_count`, `stage_block_bytes`, `stage_block_ms`, `stage_block_max_ms` | Successful staged-block count/bytes, summed SDK staging time, and maximum staging time. Uploads overlap: summed time can exceed wall time and is not an additive stage fraction. Run totals include bootstrap/manifest staging as well as table data. |
+| `upload_wait_ms` | Producer wall time enqueueing complete blocks and draining outstanding uploads before commit; includes bounded-queue backpressure. Not total upload wall time or a pure idle/CPU measurement. Run totals include metadata writers. |
 | `blob_commit_ms` | Summed create-only SDK commit time; run totals include metadata commits. |
 | `digest_spill_count`, `digest_spill_bytes`, `digest_spill_ms` | Combined successful spill count/bytes for both digest streams; sorting and spill file-write elapsed time. |
 | `digest_merge_ms`, `digest_merge_write_bytes` | Combined final digest calculation time (including in-memory sorting, final spill, consolidation and read/hash); bytes written by intermediate consolidation, not final hashing. Final spill time is nested inside final calculation time: do not sum them as disjoint stages. |
 | `digest_scratch_peak_bytes_bound` | Conservative logical-file byte bound: twice combined spill bytes, permitting simultaneous merge input/output. Not a sampled filesystem peak or allocated disk usage. Run value is the maximum table bound because tables are sequential. |
-| `local_processing_ms` | Table elapsed time minus page advance, stage and commit time, clamped to zero. Includes serialization, hashes, AES-GCM, digest/scratch I/O, setup, cleanup and instrumentation. Digest timers are subsets of this residual; do not add them again. Run value sums table residuals, excluding run setup/metadata work. |
+| `local_processing_ms` | Table elapsed time minus sequential page advance, producer upload wait and commit time, clamped to zero. Unlike the inline-staging baseline, overlapping staging durations are not subtracted. Includes serialization, hashes, AES-GCM, digest/scratch I/O, cooperative yields, setup, cleanup and instrumentation. Digest timers are subsets of this residual; do not add them again. Run value sums table residuals, excluding run setup/metadata work. |
 
 The pinned Table SDK materializes and converts the returned page before `next(pages)` returns. Consequently page time includes network/retry/backoff, response decoding and SDK entity conversion, but excludes our consumer serialization/encryption work. It is **not pure Cosmos service time**. Staging/commit time likewise includes SDK overhead and retries. These counters are logical operations, **not physical HTTP attempts**, and do not claim retry count, per-request RU charge, or throttling status. Timer contexts close even when an operation raises; failures still propagate and do not emit a success summary.
 
-Use page time as a source-read indicator, staging/commit time as a Blob-write indicator, and the local residual plus digest timings as a CPU/local-I/O indicator. Separate CPU utilization and disk measurements are needed to split CPU from local I/O. Compare stage proportions and external service metrics rather than attributing every millisecond to a server.
+Use page time as a source-read indicator, staging/commit time and producer upload waits as Blob-write indicators, and the local residual plus digest timings as a CPU/local-I/O indicator. Separate CPU utilization and disk measurements are needed to split CPU from local I/O. Concurrent stage timers overlap; do not sum them or treat them as mutually exclusive wall-time proportions. The historical inline-staging proportions below are not directly comparable to the new residual definition.
 
 ### Historical test results (2026-09-30)
 
@@ -143,6 +165,44 @@ Source paging dominated this workload, but includes SDK conversion/retries, not 
 **Restore gate remains unresolved:** the isolated restore failed with HTTP 403 at `TableServiceClient.delete_table` despite Table-native contributor access. Initial enumeration also failed until an operator initialized an empty table through ARM. No successful count/key/content/table-set verification was produced. Do not infer that SQL grants are appropriate, bypass delete/recreate or enable scheduled validation.
 
 Dedicated Azure test resources, identity grants, images, DNS and deployment records were removed and verified; shared infrastructure remained present. Encrypted synthetic backups remain under the existing 14-day Blob lifecycle policy because operator access was network-blocked; physical deletion is unverified. Detailed historical test evidence remains in [issue #25](https://github.com/smereczynski/CosmosDB-Table-Backup/issues/25).
+
+### Authorized async-staging comparison (2026-10-01)
+
+This separately authorized, completed nonproduction comparison for [issue #29](https://github.com/smereczynski/CosmosDB-Table-Backup/issues/29) used a dedicated synthetic source table, private/keyless Blob storage and HSM Key Vault, separate backup/restore identities, and an isolated metadata-write-protected restore account. Existing source tables and existing identity grants were preserved. The one-off harness and infrastructure remain session artifacts, not supported repeat procedures or project tooling.
+
+The workload was 20,000 entities in 16 partitions with 4,096-byte payloads, 500-entity sequential pages, 4 MiB blocks and 4,000 source RU/s, on the existing private `Standard_B2ats_v2` runner. Each backup read 40 pages and produced 85,908,923 encrypted table bytes in 21 blocks. The inline baseline was commit `eff4756d40550356c3c215b980532ba2bee0639d`; the candidate used concurrency `2` and queue capacity `2`. Both used Python 3.14.0 and pinned Table 12.7.0, Blob 12.30.3, Identity 1.25.3, Key Vault 4.11.0 and cryptography 50.0.1; the candidate added aiohttp 3.14.3. One warmup per implementation was excluded before three alternating baseline/candidate pairs.
+
+| Measurement | Inline baseline | Async candidate |
+|---|---|---|
+| Elapsed samples, seconds | 6.846606 / 6.982630 / 8.578291 | 5.216128 / 5.815972 / 5.857955 |
+| Median elapsed, seconds | 6.982630 | 5.815972 |
+| Median encrypted throughput, bytes/second | 12,303,233 | 14,771,206 |
+| Process RSS high-water range, bytes | 101,089,280–102,760,448 | 113,651,712–117,444,608 |
+| Producer upload wait samples, milliseconds | N/A: inline staging | 58.237 / 55.849 / 47.374 |
+| Digest logical scratch bound / residual directories | 0 bytes / 0 | 0 bytes / 0 |
+
+The candidate median elapsed time was **16.708% lower on this workload**, with higher observed RSS. Async Table paging and Blob upload overlap changed together; the difference cannot be attributed solely to staging or generalized into a guaranteed speedup. This workload stayed below the digest spill threshold, so the zero scratch result does not validate spill performance or a general memory ceiling.
+
+Both backups authenticated with the unchanged restore planner and produced matching decrypted-table SHA-256 values and independently generated count/key/content digests. Candidate isolated restore verified 20,000 entities and matching key/content digests; a separate ARM readback verified the exact authenticated target table set after runtime reported `data_verified_pending_table_set`. Real-service checks confirmed create-only conflict rejection without changing existing ciphertext, and denied backup-identity Blob deletion, Key Vault unwrap and synthetic-source writes. Offline regressions separately cover failure/cancellation propagation, deterministic block order, bounded backpressure, the block limit and exact synchronous/async v1 ciphertext framing.
+
+Filtered Azure Monitor data in the UTC 11:25–11:26 PT1M bucket reported maximum normalized RU of 98% and zero returned 429 requests. `ThrottledRequestPercentage` returned no series. Exact per-backup RU charges, complete throttling correlation and performance under induced backup throttling were not established; seeding retries are not backup evidence.
+
+The tested candidate source and both dependency manifests matched the worktree byte-for-byte. Candidate archive SHA-256: `576ea9a394289f514d1bc963d034cab82df1facdf5f367f58b65f3e31b47da0d`.
+
+Local validation used Python 3.14.7, uv 0.12.19 and `PYTHONPATH=src`. `uv lock --check` passed. The commands below all use the prefix `uv run --frozen --no-sync --no-build`:
+
+| Command suffix | Result |
+|---|---|
+| `ruff format --check .` | Passed: 40 files formatted |
+| `ruff check .` | Passed |
+| `mypy src` | Passed: 16 source files |
+| `pytest -q` | Passed: 584 tests, 95.67% coverage |
+| `pip-audit` | Passed: no known vulnerabilities |
+| `bandit -q -r src` | Passed |
+
+Changed-document local links and `git diff --check` passed. The initial local pytest invocation omitted the documented `PYTHONPATH` export and failed collection; the corrected invocation above passed without dependency or source changes. No repository infrastructure or container changes were made, so repository Bicep/container checks were not rerun.
+
+Cleanup removed the dedicated storage/backups, isolated restore account, source fixture table, private endpoints/NICs, new DNS records/zones/links, identity grants, custom role definitions, identities, deployment record and runner artifacts. Readback confirmed all 14 original resources, both original VM identities, the original source table and native role assignments, and the original Table private DNS zone/link remained. The purge-protected vault and key are soft-deleted with scheduled purge at **2026-10-08 11:45:20 UTC**; purge protection and the seven-day retention were not weakened.
 
 ### Triage a failed backup
 

@@ -40,6 +40,23 @@ def configure_logging(level: str) -> SafeLogger:
     return SafeLogger(logging.getLogger("cosmos_table_backup"))
 
 
+def silence_sdk_logging() -> None:
+    # SDK HTTP logs are not an allowlisted telemetry channel, even at INFO.
+    for name in (
+        "azure",
+        "azure.core.pipeline.policies.http_logging_policy",
+        "azure.data.tables",
+        "azure.storage.blob",
+        "azure.identity",
+        "azure.keyvault",
+    ):
+        logging.getLogger(name).setLevel(logging.CRITICAL + 1)
+    for name, logger in logging.Logger.manager.loggerDict.items():
+        if name.startswith("azure.") and isinstance(logger, logging.Logger):
+            logger.setLevel(logging.CRITICAL + 1)
+            logger.disabled = True
+
+
 def configure_monitor_export(credential: Any, connection_string: str) -> None:
     configure_azure_monitor(
         connection_string=connection_string,

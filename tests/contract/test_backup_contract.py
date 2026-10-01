@@ -1,8 +1,9 @@
+import asyncio
 import base64
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -24,41 +25,56 @@ class Paged:
         self.entities = entities
         self.fail = fail
 
-    def by_page(self):  # type: ignore[no-untyped-def]
+    async def _page(self, entities):  # type: ignore[no-untyped-def]
+        for entity in entities:
+            yield entity
+
+    async def by_page(self):  # type: ignore[no-untyped-def]
         if self.fail:
             raise RuntimeError("query failed")
         midpoint = len(self.entities) // 2
-        yield self.entities[:midpoint]
-        yield self.entities[midpoint:]
+        yield self._page(self.entities[:midpoint])
+        yield self._page(self.entities[midpoint:])
 
 
 class Table:
     def __init__(self, entities, fail: bool = False):  # type: ignore[no-untyped-def]
         self.entities = entities
         self.fail = fail
+        self.closed = False
 
     def query_entities(self, *, query_filter: str, results_per_page: int):  # type: ignore[no-untyped-def]
         assert query_filter == ""
         assert results_per_page == 2
         return Paged(self.entities, self.fail)
 
+    async def __aenter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aexit__(self, *args):  # type: ignore[no-untyped-def]
+        self.closed = True
+
 
 class Tables:
     def __init__(self, fail_query: bool = False) -> None:
         self.opened: list[str] = []
         self.fail_query = fail_query
+        self.clients: list[Table] = []
         self.data = {
             "alpha": [{"PartitionKey": "a", "RowKey": "1", "value": 42}],
             "Cards": [{"PartitionKey": "c", "RowKey": "1"}],
             "cards": [{"PartitionKey": "forbidden", "RowKey": "secret"}],
         }
 
-    def list_tables(self):  # type: ignore[no-untyped-def]
-        return [ListedTable(name) for name in reversed(self.data)]
+    async def list_tables(self):  # type: ignore[no-untyped-def]
+        for name in reversed(self.data):
+            yield ListedTable(name)
 
     def get_table_client(self, name: str) -> Table:
         self.opened.append(name)
-        return Table(self.data[name], self.fail_query and name == "alpha")
+        client = Table(self.data[name], self.fail_query and name == "alpha")
+        self.clients.append(client)
+        return client
 
 
 class Blob:
@@ -67,12 +83,12 @@ class Blob:
         self.owner = owner
         self.blocks: dict[str, bytes] = {}
 
-    def stage_block(self, *, block_id: str, data: bytes, length: int) -> None:
+    async def stage_block(self, *, block_id: str, data: bytes, length: int) -> None:
         assert length == len(data)
         self.blocks[block_id] = data
         self.owner.events.append(("stage", self.name))
 
-    def commit_block_list(self, blocks, **kwargs):  # type: ignore[no-untyped-def]
+    async def commit_block_list(self, blocks, **kwargs):  # type: ignore[no-untyped-def]
         assert kwargs["if_none_match"] == "*"
         if self.name in self.owner.objects:
             raise RuntimeError("overwrite")
@@ -103,6 +119,7 @@ def config() -> BackupConfig:
 
 def crypto() -> Mock:
     client = Mock()
+    client.wrap_key = AsyncMock()
     client.wrap_key.return_value.encrypted_key = b"w" * 256
     return client
 
@@ -113,9 +130,12 @@ def test_complete_backup_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     blobs = Container()
     key_client = crypto()
     raw_logger = Mock()
-    backup_id = BackupRunner(config(), tables, blobs, key_client, SafeLogger(raw_logger)).run()
+    backup_id = asyncio.run(
+        BackupRunner(config(), tables, blobs, key_client, SafeLogger(raw_logger)).run()
+    )
 
     assert tables.opened == ["Cards", "alpha"]
+    assert all(client.closed for client in tables.clients)
     assert "cards" not in tables.opened
     assert key_client.wrap_key.call_count == 1
     prefix = f"backups/{backup_id}/"
@@ -191,7 +211,7 @@ def test_telemetry_timing_does_not_change_backup_bytes(monkeypatch: pytest.Monke
             Mock(side_effect=[tick * clock_step for tick in range(1000)]),
         )
         blobs = Container()
-        BackupRunner(config(), Tables(), blobs, crypto(), SafeLogger(Mock())).run()
+        asyncio.run(BackupRunner(config(), Tables(), blobs, crypto(), SafeLogger(Mock())).run())
         results.append((blobs.objects, blobs.events))
     assert results[0] == results[1]
 
@@ -214,13 +234,14 @@ def test_block_overflow_leaves_no_completion_marker(
     )
 
     with pytest.raises(BackupError) as error:
-        runner.run()
+        asyncio.run(runner.run())
 
-    assert isinstance(error.value.__cause__, StorageError)
-    assert "committed-block limit" in str(error.value.__cause__)
-    assert len(blobs.events) == 1
-    assert blobs.events[0][0] == "stage"
-    assert blobs.events[0][1].endswith("tables/00000000.enc")
+    cause = error.value.__cause__
+    assert isinstance(cause, ExceptionGroup)
+    assert isinstance(cause.exceptions[0], StorageError)
+    assert "committed-block limit" in str(cause.exceptions[0])
+    assert all(kind == "stage" for kind, _ in blobs.events)
+    assert all(name.endswith("tables/00000000.enc") for _, name in blobs.events)
     assert not blobs.objects
     assert not any(name.endswith("manifest.enc") for name in blobs.blobs)
     assert not any(name.endswith("bootstrap.json") for name in blobs.blobs)
@@ -236,9 +257,76 @@ def test_any_read_failure_leaves_no_completion_marker() -> None:
         config(), Tables(fail_query=True), blobs, crypto(), SafeLogger(raw_logger)
     )
     with pytest.raises(BackupError):
-        runner.run()
+        asyncio.run(runner.run())
     assert not any(name.endswith("manifest.enc") for name in blobs.objects)
     assert not any(name.endswith("bootstrap.json") for name in blobs.objects)
     events = [call.args[0] for call in raw_logger.info.call_args_list]
     assert sum('"event":"backup.failed"' in event for event in events) == 1
     assert all('"event":"backup.completed"' not in event for event in events)
+
+
+@pytest.mark.parametrize("failure", ["stage", "commit", "serialization", "digest"])
+def test_async_pipeline_failure_never_creates_completion_marker(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    blobs = Container()
+    tables = Tables()
+    if failure in {"stage", "commit"}:
+        method = "stage_block" if failure == "stage" else "commit_block_list"
+        monkeypatch.setattr(Blob, method, AsyncMock(side_effect=RuntimeError("failed")))
+    elif failure == "serialization":
+        monkeypatch.setattr(
+            "cosmos_table_backup.backup.encode_entity", Mock(side_effect=ValueError("failed"))
+        )
+    else:
+        monkeypatch.setattr(
+            "cosmos_table_backup.backup.OrderIndependentDigest.hexdigest",
+            Mock(side_effect=RuntimeError("failed")),
+        )
+    logger = Mock()
+    with pytest.raises(BackupError):
+        asyncio.run(BackupRunner(config(), tables, blobs, crypto(), SafeLogger(logger)).run())
+    assert not blobs.objects
+    assert all(client.closed for client in tables.clients)
+    assert all(not name.endswith("manifest.enc") for name in blobs.blobs)
+    messages = [json.loads(call.args[0]) for call in logger.info.call_args_list]
+    assert messages[-1]["event"] == "backup.failed"
+    assert all(item["event"] != "backup.completed" for item in messages)
+
+
+def test_async_backup_cancellation_closes_table_and_uploads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def stalled(*args, **kwargs):  # type: ignore[no-untyped-def]
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(Blob, "stage_block", stalled)
+        tables = Tables()
+        blobs = Container()
+        logger = Mock()
+        before = asyncio.all_tasks()
+        task = asyncio.create_task(
+            BackupRunner(config(), tables, blobs, crypto(), SafeLogger(logger)).run()
+        )
+        async with asyncio.timeout(5):
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert cancelled.is_set()
+        assert all(client.closed for client in tables.clients)
+        assert not blobs.objects
+        assert asyncio.all_tasks() == before
+        records = [json.loads(call.args[0]) for call in logger.info.call_args_list]
+        assert records[-1]["event"] == "backup.failed"
+        assert records[-1]["error_type"] == "CancelledError"
+
+    asyncio.run(scenario())

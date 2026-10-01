@@ -20,6 +20,7 @@ METRIC_FIELDS = frozenset(
         "stage_block_ms",
         "stage_block_max_ms",
         "blob_commit_ms",
+        "upload_wait_ms",
         "digest_spill_count",
         "digest_spill_bytes",
         "digest_spill_ms",

@@ -12,6 +12,8 @@ Azure block blobs permit at most [50,000 committed blocks](https://learn.microso
 
 The limit includes the 33-byte AES-GCM framing below, so serialized table plaintext must leave at least 33 bytes of headroom. The writer rejects an overflowing full block during writing, or an overflowing final partial block during commit, before uploading that block. Overflow fails the backup without a completion marker; objects are not implicitly split and block sizes are not automatically increased.
 
+Backup staging uses a fixed number of asynchronous workers and a bounded queue of complete immutable encrypted blocks. Block IDs and the 50,000-slot reservation are assigned in producer order, before enqueueing, not upload-completion order. Commit awaits every staged block and submits that ordered block list with `if_none_match="*"`. Stage or producer failure cancels and awaits all workers before releasing payloads; no table commit or later manifest is attempted. Tables and source pages remain sequential, without prefetch or parallel per-object encryption. See [upload settings and memory accounting](operations.md#bounded-async-upload-settings).
+
 ## Cryptography
 
 Each run generates one random 256-bit data-encryption key (DEK). The exact versioned Key Vault key wraps it once with RSA-OAEP-256. Each independently encrypted object uses a fresh random 96-bit nonce, tracked for uniqueness during the run. AES-256-GCM object bytes are:
@@ -67,6 +69,8 @@ The data-only JSON report is version 2, explicitly `status: "data_verified_pendi
 ## Failure semantics
 
 Discovery failure, no included tables, serialization error, wrapping/encryption error, entity-read error, blob stage/commit error, or final-manifest error causes a non-zero backup exit. Partial/uncommitted objects may remain for retention cleanup, but no valid completion marker is produced. `EXCLUDED_TABLES_JSON` must be a JSON array of unique, non-empty table names. Those exact case-sensitive names are removed before any table client is opened, and the exact name `cards` is always excluded even if omitted from configuration. The backup CLI configures Azure Monitor with its managed identity and emits exact `backup.failed` and `backup.completed` identifiers; completion is emitted only after the encrypted manifest commit.
+
+Async cancellation propagates after worker/client cleanup and emits `backup.failed`, not a success event. Cancellation or connection loss during the final commit can leave its server outcome unknown: a server may have accepted the create-only manifest before the caller receives a response. The client cannot retract immutable objects and does not claim that a lost response proves the marker is absent. Discovery still uses the committed marker as the format-level completion criterion.
 
 Restore configuration/guardrail failure exits 2. Missing completion markers, malformed bootstrap or manifest data, wrong keys, nonce/AAD/tag/hash/count mismatches, oversized records, changed Blob ETags, download failures, and target write failures exit non-zero without a success report. A failed restore can leave a partially populated recreated table; rerunning first deletes and recreates it, then performs the complete authenticated restore and final target enumeration.
 
